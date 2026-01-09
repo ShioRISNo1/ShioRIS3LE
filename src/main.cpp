@@ -14,9 +14,9 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
 
     // アプリケーション情報設定
-    app.setApplicationName("ShioRIS3");
+    app.setApplicationName("ShioRIS3LE");
     app.setApplicationVersion("1.0.0");
-    app.setOrganizationName("ShioRIS3 Development Team");
+    app.setOrganizationName("ShioRIS3LE Development Team");
     app.setOrganizationDomain("shioris3.org");
 
     // スタイル設定（オプション）
@@ -53,7 +53,7 @@ int main(int argc, char *argv[])
     MainWindow window;
     window.show();
 
-    qDebug() << "ShioRIS3 application started successfully";
+    qDebug() << "ShioRIS3LE application started successfully";
 
     return app.exec();
 }

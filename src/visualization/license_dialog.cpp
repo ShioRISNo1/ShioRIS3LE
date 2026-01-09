@@ -81,7 +81,7 @@ void LicenseDialog::setupUi()
     // Header (title + version) as a compact two-line block
     QLabel *headerLabel = new QLabel(this);
     headerLabel->setTextFormat(Qt::RichText);
-    const QString headerTitle = tr("ShioRIS3 - Open Source Licenses");
+    const QString headerTitle = tr("ShioRIS3LE - Open Source Licenses");
     const QString headerVersion = tr("Version: %1").arg(QApplication::applicationVersion());
     const QString headerHtml = QStringLiteral("<div style='line-height:1.15;'>"
                                              "<span style='font-size:14px; font-weight:600;'>%1</span><br>"
@@ -132,8 +132,8 @@ QString LicenseDialog::generateLicenseInfo()
     html += ".note { color: #757575; font-style: italic; font-size: 10px; }";
     html += "</style></head><body>";
 
-    html += "<h2>About ShioRIS3</h2>";
-    html += "<p>ShioRIS3 is a prototype DICOM viewer and radiation treatment planning system ";
+    html += "<h2>About ShioRIS3LE</h2>";
+    html += "<p>ShioRIS3LE is a prototype DICOM viewer and radiation treatment planning system ";
     html += "built with Qt6, DCMTK, and OpenCV.</p>";
 
     html += "<h2>Open Source Libraries</h2>";
@@ -196,7 +196,7 @@ QString LicenseDialog::generateLicenseInfo()
 
     html += "<hr style='margin-top: 30px; border: none; border-top: 1px solid #4a4a4a;'>";
     html += "<p style='text-align: center; color: #888888;'>";
-    html += "© 2024 ShioRIS3 Development Team<br>";
+    html += "© 2024 ShioRIS3LE Development Team<br>";
     html += "This software is a research and development prototype.";
     html += "</p>";
 

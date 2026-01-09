@@ -368,7 +368,7 @@ void WebServer::sendResponse(QTcpSocket* socket, const HttpResponse& response) {
     }
 
     // Add standard headers
-    responseData.append("Server: ShioRIS3-WebServer/1.0\r\n");
+    responseData.append("Server: ShioRIS3LE-WebServer/1.0\r\n");
     responseData.append("Date: ");
     responseData.append(QDateTime::currentDateTimeUtc().toString(Qt::RFC2822Date).toLatin1());
     responseData.append("\r\n");
@@ -563,7 +563,7 @@ WebServer::HttpResponse WebServer::apiGetPatients() {
     resultObj["patients"] = patientsArray;
     resultObj["count"] = patientsArray.size();
     resultObj["message"] = patientsArray.isEmpty() ?
-        "No volume loaded. Please load a DICOM volume in ShioRIS3." :
+        "No volume loaded. Please load a DICOM volume in ShioRIS3LE." :
         "Current loaded volume available";
 
     response.body = QJsonDocument(resultObj).toJson();
@@ -581,7 +581,7 @@ WebServer::HttpResponse WebServer::apiGetVolume(const QString& patientId) {
         response.statusCode = 404;
         response.statusMessage = "Not Found";
         resultObj["status"] = "error";
-        resultObj["message"] = "No volume loaded. Please load a DICOM volume in ShioRIS3.";
+        resultObj["message"] = "No volume loaded. Please load a DICOM volume in ShioRIS3LE.";
         response.body = QJsonDocument(resultObj).toJson();
         return response;
     }
@@ -631,7 +631,7 @@ WebServer::HttpResponse WebServer::apiGetStructures(const QString& patientId, co
         response.statusCode = 404;
         response.statusMessage = "Not Found";
         resultObj["status"] = "error";
-        resultObj["message"] = "No RT Structure loaded. Please load an RT Structure file in ShioRIS3.";
+        resultObj["message"] = "No RT Structure loaded. Please load an RT Structure file in ShioRIS3LE.";
         response.body = QJsonDocument(resultObj).toJson();
         return response;
     }
@@ -790,7 +790,7 @@ WebServer::HttpResponse WebServer::apiGetDose(const QString& patientId) {
 
     if (isosurfaces.isEmpty()) {
         resultObj["status"] = "success";
-        resultObj["message"] = "No dose isosurfaces available. Please generate 3D Isosurface in ShioRIS3.";
+        resultObj["message"] = "No dose isosurfaces available. Please generate 3D Isosurface in ShioRIS3LE.";
         resultObj["isosurfaceCount"] = 0;
         resultObj["isosurfaces"] = QJsonArray();
         response.body = QJsonDocument(resultObj).toJson();
@@ -1141,4 +1141,3 @@ bool WebServer::loadSSLCertificates() {
 
     return true;
 }
-

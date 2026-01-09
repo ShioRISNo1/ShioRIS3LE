@@ -9000,7 +9000,7 @@ void DicomViewer::onExportButtonClicked(int viewIndex) {
   }
 
   // Show file save dialog
-  QString defaultFileName = "ShioRIS3_Export.usdz";
+  QString defaultFileName = "ShioRIS3LE_Export.usdz";
   if (!m_ctFilename.isEmpty()) {
     QFileInfo ctInfo(m_ctFilename);
     defaultFileName = ctInfo.completeBaseName() + "_3D.usdz";

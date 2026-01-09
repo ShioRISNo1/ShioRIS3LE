@@ -228,7 +228,7 @@ void MainWindow::setupMenus() {
   // Help メニュー
   m_helpMenu = m_menuBar->addMenu("&Help");
 
-  m_aboutAction = new QAction("&About ShioRIS3", this);
+  m_aboutAction = new QAction("&About ShioRIS3LE", this);
   m_aboutAction->setStatusTip("About this application");
   connect(m_aboutAction, &QAction::triggered, this,
           &MainWindow::aboutApplication);
@@ -344,7 +344,7 @@ void MainWindow::showDataWindow() {
                 m_syncManager->start();
               m_dataWindow->refresh();
             });
-    m_dataWindow->setWindowTitle("ShioRIS3 Data");
+    m_dataWindow->setWindowTitle("ShioRIS3LE Data");
     m_dataWindow->resize(800, 600);
   }
   // Ensure it shows on top when opened
@@ -615,8 +615,8 @@ void MainWindow::openRTStructFile() {
 void MainWindow::exitApplication() { QApplication::quit(); }
 
 void MainWindow::aboutApplication() {
-  QMessageBox::about(this, "About ShioRIS3",
-                     "<h2>ShioRIS3</h2>"
+  QMessageBox::about(this, "About ShioRIS3LE",
+                     "<h2>ShioRIS3LE</h2>"
                      "<p>Radiation Treatment Planning System</p>"
                      "<p>Version 1.0.0</p>"
                      "<p>Built with:</p>"
@@ -626,7 +626,7 @@ void MainWindow::aboutApplication() {
                      "<li>OpenCV 4.11</li>"
                      "<li>OpenGL 4.1</li>"
                      "</ul>"
-                     "<p>© 2025 ShioRIS3 Development Team</p>");
+                     "<p>© 2025 ShioRIS3LE Development Team</p>");
 }
 
 void MainWindow::onImageLoaded(const QString &filename) {
@@ -665,7 +665,7 @@ void MainWindow::onStructureLoadProgress(int current, int total) {
 }
 
 void MainWindow::updateWindowTitle(const QString &filename) {
-  QString title = "ShioRIS3 - DICOM Viewer";
+  QString title = "ShioRIS3LE - DICOM Viewer";
 
   if (!filename.isEmpty()) {
     QFileInfo fileInfo(filename);

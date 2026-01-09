@@ -166,7 +166,7 @@ class ShioRIS3Viewer {
     }
 
     async init() {
-        console.log('Initializing ShioRIS3 Viewer...');
+        console.log('Initializing ShioRIS3LE Viewer...');
         this.setupCacheBypassButton();
         await this.loadBuildInfo();
 
@@ -197,9 +197,9 @@ class ShioRIS3Viewer {
             // Hide loading indicator
             this.hideLoading();
 
-            console.log('ShioRIS3 Viewer initialized successfully');
+            console.log('ShioRIS3LE Viewer initialized successfully');
         } catch (error) {
-            console.error('Failed to initialize ShioRIS3 Viewer:', error);
+            console.error('Failed to initialize ShioRIS3LE Viewer:', error);
             this.hideLoading();
             alert(`Initialization failed: ${error.message}\n\nPlease check the browser console for details.`);
         }
@@ -211,7 +211,7 @@ class ShioRIS3Viewer {
         try {
             const success = await this.apiClient.testConnection();
             if (success) {
-                statusElement.textContent = 'Connected to ShioRIS3';
+                statusElement.textContent = 'Connected to ShioRIS3LE';
                 statusElement.classList.add('connected');
                 console.log('Successfully connected to backend');
             } else {
@@ -298,12 +298,12 @@ class ShioRIS3Viewer {
                             this.volumeRenderer.addDose(doseData);
                             console.log(`Dose data loaded: ${doseData.isosurfaceCount} isosurfaces, ${doseData.totalTriangles} triangles`);
                         } else {
-                            console.log('No dose isosurfaces available. Generate them in ShioRIS3 using "3D Isosurface" button.');
+                            console.log('No dose isosurfaces available. Generate them in ShioRIS3LE using "3D Isosurface" button.');
                         }
                     }
                 } catch (error) {
                     console.warn('Failed to load dose data:', error.message);
-                    console.log('Dose isosurfaces not available. Generate them in ShioRIS3 using "3D Isosurface" button.');
+                    console.log('Dose isosurfaces not available. Generate them in ShioRIS3LE using "3D Isosurface" button.');
                 }
             }
 
@@ -319,7 +319,7 @@ class ShioRIS3Viewer {
         } catch (error) {
             console.error('Failed to load patient:', error);
             this.hideLoading();
-            alert(`Failed to load patient data: ${error.message}\n\nMake sure you have loaded a DICOM volume in ShioRIS3.`);
+            alert(`Failed to load patient data: ${error.message}\n\nMake sure you have loaded a DICOM volume in ShioRIS3LE.`);
         }
     }
 
@@ -352,7 +352,7 @@ class ShioRIS3Viewer {
                     }
                 } catch (error) {
                     console.error('Failed to load structures:', error);
-                    alert('Failed to load RT Structure data.\n\nMake sure you have loaded an RT Structure file in ShioRIS3.');
+                    alert('Failed to load RT Structure data.\n\nMake sure you have loaded an RT Structure file in ShioRIS3LE.');
                     e.target.checked = false;
                     return;
                 }
@@ -369,13 +369,13 @@ class ShioRIS3Viewer {
                         console.log(`Dose data loaded: ${doseData.isosurfaceCount} isosurfaces`);
                     } else {
                         console.log('No dose isosurfaces available');
-                        alert('No dose isosurfaces available.\n\nPlease generate them in ShioRIS3:\n1. Load dose data\n2. Click "3D Isosurface" button');
+                        alert('No dose isosurfaces available.\n\nPlease generate them in ShioRIS3LE:\n1. Load dose data\n2. Click "3D Isosurface" button');
                         e.target.checked = false;
                         return;
                     }
                 } catch (error) {
                     console.error('Failed to load dose:', error);
-                    alert('Failed to load dose data.\n\nMake sure you have:\n1. Loaded dose in ShioRIS3\n2. Generated isosurfaces using "3D Isosurface" button');
+                    alert('Failed to load dose data.\n\nMake sure you have:\n1. Loaded dose in ShioRIS3LE\n2. Generated isosurfaces using "3D Isosurface" button');
                     e.target.checked = false;
                     return;
                 }
