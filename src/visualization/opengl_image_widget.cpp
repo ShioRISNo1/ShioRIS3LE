@@ -87,11 +87,6 @@ void OpenGLImageWidget::setStructurePoints(const StructurePointList &points) {
   update();
 }
 
-void OpenGLImageWidget::setReferencePoints(const StructurePointList &points) {
-  m_referencePoints = points;
-  update();
-}
-
 void OpenGLImageWidget::setDoseLines(const StructureLineList &lines) {
   m_doseLines = lines;
   update();
@@ -232,7 +227,7 @@ void OpenGLImageWidget::paintGL() {
 
   if (m_lineProgram && (!m_slicePositionLines.isEmpty() || !m_structureLines.isEmpty() ||
                         !m_doseLines.isEmpty() || !m_structurePoints.isEmpty() ||
-                        !m_referencePoints.isEmpty() || m_showCursorCross)) {
+                        m_showCursorCross)) {
     m_lineProgram->bind();
     m_lineProgram->setUniformValue(m_lineMatrixLoc, mat);
 
@@ -309,27 +304,6 @@ void OpenGLImageWidget::paintGL() {
       glPointSize(5.0f);
       glDrawArrays(GL_POINTS, 0, 1);
       glDisableVertexAttribArray(0);
-    }
-
-    // draw reference points as blue X markers
-    if (!m_referencePoints.isEmpty()) {
-      glLineWidth(2.0f);
-      m_lineProgram->setUniformValue(m_lineColorLoc, QColor(0, 0, 255)); // Blue
-      for (const auto &ptItem : m_referencePoints) {
-        const float s = 4.0f; // half size of X in mm
-        float cx = static_cast<float>(ptItem.point.x());
-        float cy = static_cast<float>(ptItem.point.y());
-        GLfloat verts[8] = {
-          cx - s, cy - s,  // diagonal 1 start
-          cx + s, cy + s,  // diagonal 1 end
-          cx - s, cy + s,  // diagonal 2 start
-          cx + s, cy - s   // diagonal 2 end
-        };
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, verts);
-        glDrawArrays(GL_LINES, 0, 4); // Draw both diagonals as two lines
-        glDisableVertexAttribArray(0);
-      }
     }
 
     if (m_showCursorCross) {

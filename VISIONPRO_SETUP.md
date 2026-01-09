@@ -361,7 +361,6 @@ m_webServer->start(port, useSSL);
 
 ### Phase 3: 高度な機能（優先度: 中）
 - [ ] DVH/DPSD表示の空間UI
-- [ ] Brachytherapy線源の空間配置
 - [ ] AI自動セグメンテーション結果の3D表示
 - [ ] スナップショット・動画キャプチャ機能
 

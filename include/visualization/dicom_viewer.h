@@ -4,8 +4,6 @@
 #include "visualization/collapsible_group_box.h"
 #include "visualization/opengl_3d_widget.h"
 #include "visualization/opengl_image_widget.h"
-#include "brachy/brachy_dose_calculator.h"
-#include "brachy/dwell_time_optimizer.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QColor>
@@ -55,9 +53,6 @@
 #include <optional>
 #include <vector>
 
-class QProgressBar;
-
-#include "dicom/brachy_plan.h"
 #include "dicom/dicom_reader.h"
 #include "dicom/dicom_volume.h"
 #include "dicom/dose_resampled_volume.h"
@@ -139,7 +134,6 @@ public:
                           int activeSeriesIndex = 0);
   bool loadRTDoseFile(const QString &filename, bool activate = true);
   bool loadRTStructFile(const QString &filename);
-  bool loadBrachyPlanFile(const QString &filename);
   void setDatabaseManager(DatabaseManager *dbManager);
   void setWindowLevel(double window, double level);
   void showNextImage();
@@ -211,21 +205,6 @@ private slots:
   void onShowDVH();
   void onDvhCalculationRequested(const QString &roiName);
   void onDvhVisibilityChanged(int roiIndex, bool visible);
-  void onReadBrachyPlan();
-  void onLoadBrachyData();
-  void onCalculateBrachyDose();
-  void onAddDoseEvaluationPoint();
-  void onClearDoseEvaluationPoints();
-  void onOptimizeDwellTimes();
-  void onGenerateRandomSources();
-  void onGenerateTestSource();
-  bool loadBrachySourceData(const QString &filename);
-  void autoLoadBrachySourceData();
-  void updateReferencePointsDisplay(
-      const QVector<Brachy::ReferencePointError> &errors = QVector<Brachy::ReferencePointError>());
-  void showReferencePointErrorDialog(const QVector<Brachy::ReferencePointError> &errors,
-                                      double normalizationFactor);
-  void onShowRefPointsChanged(int state);
   void onDvhCalcMaxChanged(double calcMaxGy);
   void onProfileLineSelection(int viewIndex);
   void onProfileLineSaveRequested(int viewIndex, int slotIndex);
@@ -247,7 +226,6 @@ protected:
 
 private:
   void setupUI();
-  void setBrachyStatusStyle(const QString &borderColor);
   void updateImage();
   void updateImage(int viewIndex, bool updateStructure = true);
   void update3DView(int viewIndex);
@@ -451,31 +429,6 @@ private:
   QListWidget *m_doseListWidget{nullptr};
   QPushButton *m_randomStudyButton{nullptr};
   class WebServer *m_webServer{nullptr};
-  QWidget *m_brachyPanel{nullptr};
-  QPushButton *m_brachyReadButton{nullptr};
-  QListWidget *m_brachyListWidget{nullptr};
-  QPushButton *m_brachyLoadDataButton{nullptr};
-  QPushButton *m_brachyCalcDoseButton{nullptr};
-  QPushButton *m_brachyRandomSourceButton{nullptr};
-  QPushButton *m_brachyTestSourceButton{nullptr};
-  QProgressBar *m_brachyProgressBar{nullptr};
-  QLabel *m_brachyDataStatus{nullptr};
-  QString m_brachyStatusBorderColor{QStringLiteral("#666666")};
-  QDoubleSpinBox *m_brachyVoxelSizeSpinBox{nullptr};
-
-  // Dose optimization UI
-  QPushButton *m_brachyAddEvalPointButton{nullptr};
-  QPushButton *m_brachyClearEvalPointsButton{nullptr};
-  QPushButton *m_brachyOptimizeButton{nullptr};
-  QListWidget *m_brachyEvalPointsList{nullptr};
-  QSpinBox *m_brachyOptimizationIterations{nullptr};
-  QDoubleSpinBox *m_brachyOptimizationTolerance{nullptr};
-
-  // Reference Points UI
-  QListWidget *m_brachyRefPointsList{nullptr};
-  QCheckBox *m_brachyShowRefPointsCheck{nullptr};
-
-
   // Window/Level controls
   CollapsibleGroupBox *m_windowLevelGroup;
   QSlider *m_windowSlider;
@@ -546,13 +499,6 @@ private:
   DicomVolume m_volume;
   RTDoseVolume m_doseVolume;
   DoseResampledVolume m_resampledDose;
-  struct BrachyDoseResult {
-    bool success{false};
-    RTDoseVolume dose;
-    QString errorMessage;
-    double normalizationFactor{1.0};
-    QVector<Brachy::ReferencePointError> referencePointErrors;
-  };
   struct DoseItem {
     DoseResampledVolume volume;
     DoseItemWidget *widget{nullptr};
@@ -567,10 +513,6 @@ private:
   RTStructureSet m_rtstruct;
   bool m_rtstructLoaded{false};
   QString m_lastRtStructPath;
-  BrachyPlan m_brachyPlan;
-  bool m_brachyLoaded{false};
-  std::unique_ptr<Brachy::BrachyDoseCalculator> m_brachyDoseCalc;
-  std::unique_ptr<Brachy::DwellTimeOptimizer> m_brachyOptimizer;
   QStackedLayout *m_viewStacks[VIEW_COUNT]{nullptr};
   QWidget *m_imagePanels[VIEW_COUNT]{nullptr};
   DVHWindow *m_dvhWidgets[VIEW_COUNT]{nullptr};
