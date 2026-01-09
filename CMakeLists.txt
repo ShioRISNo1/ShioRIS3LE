@@ -255,7 +255,6 @@ set(HEADERS
     include/visualization/dvh_window.h
     include/visualization/dose_profile_window.h
     include/visualization/dpsd_window.h
-    include/visualization/gamma_analysis_window.h
     include/visualization/random_study_dialog.h
     include/visualization/data_window.h
     include/visualization/fusion_dialog.h
@@ -294,7 +293,6 @@ set(SOURCES
     src/visualization/dvh_window.cpp
     src/visualization/dose_profile_window.cpp
     src/visualization/dpsd_window.cpp
-    src/visualization/gamma_analysis_window.cpp
     src/visualization/random_study_dialog.cpp
     src/visualization/data_window.cpp
     src/visualization/fusion_dialog.cpp
