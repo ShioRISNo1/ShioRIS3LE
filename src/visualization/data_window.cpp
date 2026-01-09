@@ -678,7 +678,7 @@ void DataWindow::loadStudies(const QString &patientKey,
       // Check if this is a ShioRIS3 calculated dose
       bool isCalculatedDose = rt.name.contains("ShioRIS3 Calculated Dose", Qt::CaseInsensitive);
       if (isCalculatedDose) {
-        label = QString("[ShioRIS3] %1").arg(label);
+        label = QString("[ShioRIS3LE] %1").arg(label);
         item->setForeground(0, QColor(0, 150, 0)); // Dark green text
         item->setForeground(1, QColor(0, 150, 0));
       }
@@ -723,7 +723,7 @@ void DataWindow::loadStudies(const QString &patientKey,
     // Check if this is a ShioRIS3 calculated dose
     bool isCalculatedDose = rt.name.contains("ShioRIS3 Calculated Dose", Qt::CaseInsensitive);
     if (isCalculatedDose) {
-      studyLabel = QString("[ShioRIS3] %1").arg(studyLabel);
+      studyLabel = QString("[ShioRIS3LE] %1").arg(studyLabel);
       studyItem->setForeground(0, QColor(0, 150, 0)); // Dark green text
       studyItem->setForeground(1, QColor(0, 150, 0));
     }
