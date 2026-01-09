@@ -763,6 +763,10 @@ private:
   QStringList m_imageSeriesModalities;
   int m_activeImageSeriesIndex{0};
   int m_primaryImageSeriesIndex{0};
+  bool m_aiSuppressSourceTracking{false};
+  bool m_aiHasDicomSource{false};
+  bool m_aiCurrentDicomSourceIsDirectory{false};
+  QString m_aiCurrentDicomSourcePath;
   struct ImageSeriesCacheEntry {
     bool prepared{false};
     DicomVolume volume;

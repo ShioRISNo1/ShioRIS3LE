@@ -2876,6 +2876,46 @@ bool DicomViewer::loadDicomFile(const QString &filename) {
   return false;
 }
 
+void DicomViewer::setFusionPreviewImage(const QImage &image, double spacingX,
+                                        double spacingY) {
+  if (image.isNull())
+    return;
+  m_fusionViewImage = image;
+  m_fusionSpacingX = spacingX > 0.0 ? spacingX : 1.0;
+  m_fusionSpacingY = spacingY > 0.0 ? spacingY : 1.0;
+  if (!m_fusionViewActive) {
+    m_viewModeBeforeFusion = m_viewMode;
+  }
+  m_fusionViewActive = true;
+  if (m_viewMode != ViewMode::Dual) {
+    m_restoreViewModeAfterFusion = true;
+    setViewMode(ViewMode::Dual);
+  } else {
+    m_restoreViewModeAfterFusion = false;
+  }
+  setViewToImage(1);
+  updateImage(1);
+  updateSliceLabels();
+  updateImageSeriesButtons();
+}
+
+void DicomViewer::clearFusionPreviewImage() {
+  if (!m_fusionViewActive)
+    return;
+  m_fusionViewActive = false;
+  m_fusionViewImage = QImage();
+  m_fusionSpacingX = 1.0;
+  m_fusionSpacingY = 1.0;
+  if (m_restoreViewModeAfterFusion) {
+    ViewMode restoreMode = m_viewModeBeforeFusion;
+    m_restoreViewModeAfterFusion = false;
+    setViewMode(restoreMode);
+  }
+  updateImage();
+  updateSliceLabels();
+  updateImageSeriesButtons();
+}
+
 void DicomViewer::loadSlice(int viewIndex, int sliceIndex) {
   if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
     return;
@@ -3422,6 +3462,34 @@ bool DicomViewer::loadDicomDirectory(const QString &directory, bool loadCt,
         QDir(directory).absolutePath();
   }
   return loaded;
+}
+
+bool DicomViewer::showExternalImageSeries(const QString &directory,
+                                          const QString &modality,
+                                          const DicomVolume &volume,
+                                          double window, double level) {
+  Q_UNUSED(directory)
+  Q_UNUSED(modality)
+  if (volume.depth() <= 0 || volume.width() <= 0 || volume.height() <= 0)
+    return false;
+
+  const double useWindow = window > 0.0
+                               ? window
+                               : (m_windowSlider ? m_windowSlider->value()
+                                                 : 256.0);
+  const double useLevel =
+      std::isfinite(level)
+          ? level
+          : (m_levelSlider ? m_levelSlider->value() : 128.0);
+
+  int mid = volume.depth() / 2;
+  QImage slice = volume.getSlice(mid, DicomVolume::Orientation::Axial, useWindow,
+                                 useLevel);
+  if (slice.isNull())
+    return false;
+
+  setFusionPreviewImage(slice, volume.spacingX(), volume.spacingY());
+  return true;
 }
 
 bool DicomViewer::loadRTDoseFile(const QString &filename, bool activate) {
@@ -7367,11 +7435,12 @@ bool DicomViewer::ensureDvhDataReady(int roiIndex,
     return false;
   }
   if (roiIndex < 0 || roiIndex >= m_rtstruct.roiCount()) {
-                    .arg(roiIndex));
+    qWarning() << QString("Invalid ROI index for DVH request: %1").arg(roiIndex);
     return false;
   }
   if (m_dvhWatchers.contains(roiIndex)) {
-                    .arg(m_rtstruct.roiName(roiIndex)));
+    qWarning() << QString("DVH calculation already running for ROI: %1")
+                      .arg(m_rtstruct.roiName(roiIndex));
     return false;
   }
 
@@ -7387,7 +7456,9 @@ bool DicomViewer::ensureDvhDataReady(int roiIndex,
       data.isVisible = true;
       m_dvhData[roiIndex] = std::move(data);
     } catch (const std::exception &e) {
-                      .arg(QString::fromUtf8(e.what())));
+      qWarning() << QString("DVH calculation failed for ROI %1: %2")
+                        .arg(roiIndex)
+                        .arg(QString::fromUtf8(e.what()));
       return false;
     }
   } else {
@@ -7522,14 +7593,15 @@ bool DicomViewer::runDpsdAnalysis(const QString &roiName,
   }
   int roiIndex = findRoiIndex(roiName);
   if (roiIndex < 0) {
-                    .arg(roiName));
+    qWarning() << QString("Unknown ROI for DPSD analysis: %1").arg(roiName);
     return false;
   }
   int sampleIndex = -1;
   if (!sampleRoiName.trimmed().isEmpty()) {
     sampleIndex = findRoiIndex(sampleRoiName);
     if (sampleIndex < 0) {
-                      .arg(sampleRoiName));
+      qWarning() << QString("Unknown sample ROI for DPSD analysis: %1")
+                        .arg(sampleRoiName);
       return false;
     }
   }
@@ -7546,7 +7618,8 @@ bool DicomViewer::runDpsdAnalysis(const QString &roiName,
           mode, sampleIndex, nullptr);
     }
   } catch (const std::exception &e) {
-                    .arg(QString::fromUtf8(e.what())));
+    qWarning() << QString("DPSD analysis failed: %1")
+                      .arg(QString::fromUtf8(e.what()));
     return false;
   }
 
@@ -7845,8 +7918,6 @@ void DicomViewer::updateImage(int viewIndex, bool updateStructure) {
       }
     }
   }
-
-#ifdef USE_ONNXRUNTIME
 
   if (updateStructure) {
     StructureLineList sLines;
@@ -13098,6 +13169,89 @@ cv::Mat DicomViewer::getCurrentVolume() const {
     
     qWarning() << "No volume or files available";
     return cv::Mat();
+}
+
+cv::Mat DicomViewer::getSingleSliceAsMatrix() const {
+  if (m_dicomFiles.isEmpty())
+    return cv::Mat();
+
+  DicomReader reader;
+  const QString path = m_dicomFiles.first();
+  if (!reader.loadDicomFile(path))
+    return cv::Mat();
+
+  if (m_windowSlider && m_levelSlider)
+    reader.setWindowLevel(m_windowSlider->value(), m_levelSlider->value());
+
+  QImage image = reader.getImage();
+  if (image.isNull())
+    return cv::Mat();
+
+  QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
+  cv::Mat slice(gray.height(), gray.width(), CV_16SC1);
+  const int stride = gray.bytesPerLine();
+  const uchar *data = gray.constBits();
+  for (int y = 0; y < gray.height(); ++y) {
+    const uchar *row = data + y * stride;
+    for (int x = 0; x < gray.width(); ++x) {
+      int16_t ctValue =
+          static_cast<int16_t>(static_cast<int>(row[x]) - 128) * 16;
+      slice.at<int16_t>(y, x) = ctValue;
+    }
+  }
+  return slice;
+}
+
+cv::Mat DicomViewer::buildVolumeFromFiles() const {
+  if (m_dicomFiles.isEmpty())
+    return cv::Mat();
+
+  DicomReader reader;
+  if (!reader.loadDicomFile(m_dicomFiles.first()))
+    return cv::Mat();
+
+  if (m_windowSlider && m_levelSlider)
+    reader.setWindowLevel(m_windowSlider->value(), m_levelSlider->value());
+
+  QImage firstImage = reader.getImage();
+  if (firstImage.isNull())
+    return cv::Mat();
+
+  QImage firstGray = firstImage.convertToFormat(QImage::Format_Grayscale8);
+  const int width = firstGray.width();
+  const int height = firstGray.height();
+  const int depth = m_dicomFiles.size();
+  if (width <= 0 || height <= 0 || depth <= 0)
+    return cv::Mat();
+
+  int sizes[] = {depth, height, width};
+  cv::Mat volume(3, sizes, CV_16SC1, cv::Scalar(0));
+
+  for (int z = 0; z < depth; ++z) {
+    DicomReader sliceReader;
+    if (!sliceReader.loadDicomFile(m_dicomFiles.at(z)))
+      return cv::Mat();
+    if (m_windowSlider && m_levelSlider)
+      sliceReader.setWindowLevel(m_windowSlider->value(), m_levelSlider->value());
+    QImage image = sliceReader.getImage();
+    if (image.isNull())
+      return cv::Mat();
+    QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
+    if (gray.width() != width || gray.height() != height)
+      return cv::Mat();
+    const int stride = gray.bytesPerLine();
+    const uchar *data = gray.constBits();
+    for (int y = 0; y < height; ++y) {
+      const uchar *row = data + y * stride;
+      for (int x = 0; x < width; ++x) {
+        int16_t ctValue =
+            static_cast<int16_t>(static_cast<int>(row[x]) - 128) * 16;
+        volume.at<int16_t>(z, y, x) = ctValue;
+      }
+    }
+  }
+
+  return volume;
 }
 
 

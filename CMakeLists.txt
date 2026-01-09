@@ -355,12 +355,9 @@ set(HEADERS
     include/visualization/gamma_analysis_window.h
     include/visualization/random_study_dialog.h
     include/visualization/data_window.h
-    include/visualization/auto_segmentation_dialog.h
     include/visualization/fusion_dialog.h
     include/visualization/license_dialog.h
-    include/visualization/translator_window.h
     include/platform/macos_audio_permissions.h
-    include/ai/lmstudio_client.h
     include/database/database_manager.h
     include/database/smart_scanner.h
     include/database/database_sync_manager.h
@@ -413,11 +410,8 @@ set(SOURCES
     src/visualization/gamma_analysis_window.cpp
     src/visualization/random_study_dialog.cpp
     src/visualization/data_window.cpp
-    src/visualization/auto_segmentation_dialog.cpp
     src/visualization/fusion_dialog.cpp
     src/visualization/license_dialog.cpp
-    src/visualization/translator_window.cpp
-    src/ai/lmstudio_client.cpp
     src/qrcodegen.cpp
     src/database/database_manager.cpp
     src/database/smart_scanner.cpp
