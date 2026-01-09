@@ -1,7 +1,5 @@
 #include "visualization/dicom_viewer.h"
 #include "ai/lmstudio_client.h"
-#include "ai/whisper_client.h"
-#include "ai/audio_recorder.h"
 #include "web/web_server.h"
 #include "export/usdz_exporter.h"
 #include "visualization/collapsible_group_box.h"
@@ -1701,35 +1699,6 @@ DicomViewer::DicomViewer(QWidget *parent, bool showControls)
             &DicomViewer::onAiModelsFetchFailed);
   }
 
-  // Initialize WhisperClient and AudioRecorder
-  m_whisperClient = new WhisperClient(this);
-  m_audioRecorder = new AudioRecorder(this);
-
-  if (m_whisperClient) {
-    connect(m_whisperClient, &WhisperClient::transcriptionReady, this,
-            &DicomViewer::onWhisperTranscriptionReady);
-    connect(m_whisperClient, &WhisperClient::error, this,
-            &DicomViewer::onWhisperError);
-    connect(m_whisperClient, &WhisperClient::modelLoaded, this,
-            &DicomViewer::onWhisperModelLoaded);
-
-    // Try to load any available Whisper model
-    // This will try multiple model sizes (tiny, base, small, etc.) and multiple paths
-    qDebug() << "Attempting to load available Whisper model...";
-    m_whisperClient->loadAnyAvailableModel();
-  }
-
-  if (m_audioRecorder) {
-    connect(m_audioRecorder, &AudioRecorder::recordingStarted, this,
-            &DicomViewer::onAudioRecordingStarted);
-    connect(m_audioRecorder, &AudioRecorder::recordingStopped, this,
-            &DicomViewer::onAudioRecordingStopped);
-    connect(m_audioRecorder, &AudioRecorder::audioLevelChanged, this,
-            &DicomViewer::onAudioLevelChanged);
-    connect(m_audioRecorder, &AudioRecorder::error, this,
-            &DicomViewer::onWhisperError);
-  }
-
   loadAiSettings();
 
   // Initialize WebServer for Vision Pro integration
@@ -2961,11 +2930,8 @@ void DicomViewer::setupUI() {
   m_aiSendButton = new QPushButton(tr("送信"), m_aiControlPanel);
   m_aiExecuteButton = new QPushButton(tr("コマンド実行"), m_aiControlPanel);
   m_aiExecuteButton->setEnabled(false);
-  m_aiVoiceRecordButton = new QPushButton(tr("🎤 音声入力"), m_aiControlPanel);
-  m_aiVoiceRecordButton->setEnabled(false);  // Will be enabled when Whisper model is loaded
   aiButtonRow->addWidget(m_aiSendButton);
   aiButtonRow->addWidget(m_aiExecuteButton);
-  aiButtonRow->addWidget(m_aiVoiceRecordButton);
   aiButtonRow->addStretch(1);
   aiControlLayout->addLayout(aiButtonRow);
 
@@ -3028,8 +2994,6 @@ void DicomViewer::setupUI() {
           &DicomViewer::onAiSendPrompt);
   connect(m_aiExecuteButton, &QPushButton::clicked, this,
           &DicomViewer::onAiExecutePendingCommands);
-  connect(m_aiVoiceRecordButton, &QPushButton::clicked, this,
-          &DicomViewer::onAiVoiceRecordButtonClicked);
   connect(m_aiMacroSaveButton, &QPushButton::clicked, this,
           &DicomViewer::onAiMacroSaveRequested);
   connect(m_aiMacroDeleteButton, &QPushButton::clicked, this,
@@ -8326,123 +8290,6 @@ void DicomViewer::onAiModelChanged(int) {
     m_lmStudioClient->setModel(selected);
 
   saveAiSettings();
-}
-
-// Voice input slots
-void DicomViewer::onAiVoiceRecordButtonClicked() {
-  if (!m_audioRecorder) {
-    qWarning() << "AudioRecorder not initialized";
-    return;
-  }
-
-  if (m_audioRecorder->isRecording()) {
-    // Stop recording
-    m_audioRecorder->stopRecording();
-  } else {
-    // Start recording
-    if (!m_audioRecorder->startRecording()) {
-      QMessageBox::warning(this, tr("音声入力エラー"),
-                          tr("音声録音を開始できませんでした。"));
-    }
-  }
-}
-
-void DicomViewer::onAudioRecordingStarted() {
-  if (m_aiVoiceRecordButton) {
-    m_aiVoiceRecordButton->setText(tr("■ 停止"));
-    m_aiVoiceRecordButton->setStyleSheet("background-color: #ff4444;");
-  }
-  if (m_aiStatusLabel) {
-    m_aiStatusLabel->setText(tr("録音中..."));
-  }
-}
-
-void DicomViewer::onAudioRecordingStopped(const QByteArray &audioData) {
-  if (m_aiVoiceRecordButton) {
-    m_aiVoiceRecordButton->setText(tr("🎤 音声入力"));
-    m_aiVoiceRecordButton->setStyleSheet("");
-  }
-  if (m_aiStatusLabel) {
-    m_aiStatusLabel->setText(tr("音声認識中..."));
-  }
-
-  // Send audio to Whisper for transcription (run in background thread)
-  if (m_whisperClient && !audioData.isEmpty()) {
-    // Run transcription in background to avoid blocking UI
-    // Note: transcribeFromWav will emit transcriptionReady signal,
-    // which is already connected to onWhisperTranscriptionReady slot
-    // Explicitly discard the QFuture return value to suppress nodiscard warning
-    (void)QtConcurrent::run([this, audioData]() {
-      m_whisperClient->transcribeFromWav(audioData);
-    });
-  } else {
-    if (m_aiStatusLabel) {
-      m_aiStatusLabel->setText(tr("音声データが空です"));
-    }
-  }
-}
-
-void DicomViewer::onAudioLevelChanged(float level) {
-  // Optional: Update UI to show audio level
-  // Could update a progress bar or visual indicator
-  Q_UNUSED(level);
-}
-
-void DicomViewer::onWhisperTranscriptionReady(const QString &text) {
-  if (m_aiStatusLabel) {
-    m_aiStatusLabel->setText(tr("認識完了"));
-  }
-
-  // Insert transcribed text into AI prompt input
-  if (m_aiPromptEdit) {
-    QString currentText = m_aiPromptEdit->toPlainText();
-    if (!currentText.isEmpty() && !currentText.endsWith('\n')) {
-      currentText += " ";
-    }
-    currentText += text;
-    m_aiPromptEdit->setPlainText(currentText);
-    m_aiPromptEdit->moveCursor(QTextCursor::End);
-  }
-
-  appendAiLog(tr("音声認識結果: %1").arg(text));
-}
-
-void DicomViewer::onWhisperError(const QString &errorMsg) {
-  if (m_aiStatusLabel) {
-    m_aiStatusLabel->setText(tr("エラー"));
-  }
-
-  QMessageBox::warning(this, tr("音声認識エラー"), errorMsg);
-  appendAiLog(tr("音声認識エラー: %1").arg(errorMsg));
-}
-
-void DicomViewer::onWhisperModelLoaded(bool success) {
-  if (success) {
-    qDebug() << "Whisper model loaded successfully";
-    if (m_aiVoiceRecordButton) {
-      m_aiVoiceRecordButton->setEnabled(true);
-    }
-  } else {
-    qWarning() << "Failed to load Whisper model";
-    if (m_aiVoiceRecordButton) {
-      m_aiVoiceRecordButton->setEnabled(false);
-    }
-
-    // Show multiple possible model locations
-    QString examplePath1 = QDir::homePath() + "/Library/Application Support/ShioRIS3/whisper/models/";
-    QString examplePath2 = WhisperClient::getDefaultModelPath(WhisperClient::ModelSize::Base);
-    examplePath2 = examplePath2.left(examplePath2.lastIndexOf('/') + 1);  // Get directory path
-
-    QMessageBox::warning(
-        this, tr("音声認識"),
-        tr("Whisperモデルの読み込みに失敗しました。\n\n"
-           "以下のいずれかのパスにモデルファイル（ggml-tiny.bin、ggml-base.binなど）を配置してください:\n\n"
-           "1. %1\n"
-           "2. %2\n\n"
-           "モデルファイルのダウンロード方法については、BUILD_INSTRUCTIONS_WHISPER.mdを参照してください。")
-            .arg(examplePath1)
-            .arg(examplePath2));
-  }
 }
 
 void DicomViewer::loadAiSettings() {

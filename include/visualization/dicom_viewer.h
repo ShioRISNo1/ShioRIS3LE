@@ -83,8 +83,6 @@ class DoseProfileWindow;
 class MultiRowTabWidget;
 class GammaAnalysisWindow;
 class LmStudioClient;
-class WhisperClient;
-class AudioRecorder;
 class DatabaseManager;
 
 namespace CyberKnife {
@@ -305,15 +303,6 @@ private slots:
   void onAiModelsReceived(const QStringList &models);
   void onAiModelsFetchFailed(const QString &errorMessage);
   void onAiModelChanged(int index);
-
-  // Voice input slots
-  void onAiVoiceRecordButtonClicked();
-  void onAudioRecordingStarted();
-  void onAudioRecordingStopped(const QByteArray &audioData);
-  void onAudioLevelChanged(float level);
-  void onWhisperTranscriptionReady(const QString &text);
-  void onWhisperError(const QString &errorMsg);
-  void onWhisperModelLoaded(bool success);
 
 protected:
   void wheelEvent(QWheelEvent *event) override;
@@ -556,15 +545,6 @@ private:
   QPushButton *m_aiMacroExportButton{nullptr};
   QPushButton *m_aiMacroImportButton{nullptr};
 
-  // Voice input UI components
-  QPushButton *m_aiVoiceRecordButton{nullptr};
-  QLabel *m_aiVoiceStatusLabel{nullptr};
-  QComboBox *m_aiWhisperModelCombo{nullptr};
-  QComboBox *m_aiLanguageCombo{nullptr};
-  QCheckBox *m_aiVoiceAutoSendCheck{nullptr};
-  QLabel *m_aiTranscriptionPreview{nullptr};
-  QProgressBar *m_aiVoiceProgressBar{nullptr};
-
   QJsonArray m_pendingAiCommands;
   QJsonArray m_lastAiCommandSequence;
   QVector<AiCommandStep> m_aiCommandSteps;
@@ -581,10 +561,7 @@ private:
   };
   QMap<QString, AiMacroDefinition> m_aiMacros;
   LmStudioClient *m_lmStudioClient{nullptr};
-  WhisperClient *m_whisperClient{nullptr};
-  AudioRecorder *m_audioRecorder{nullptr};
   class WebServer *m_webServer{nullptr};
-  bool m_isRecording{false};
   bool m_aiRequestInFlight{false};
   QStringList m_availableAiModels;
   QString m_aiPreferredModel;
