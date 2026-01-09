@@ -1520,16 +1520,6 @@ void DicomViewer::setupUI() {
     m_lineToggleButtons[i]->setVisible(false); // Hidden by default, shown only in 3D view
     m_lineToggleButtons[i]->raise();
 
-    // Surface toggle button (for 3D view only - Structure Surfaces)
-    m_surfaceToggleButtons[i] = new QPushButton(m_viewContainers[i]);
-    m_surfaceToggleButtons[i]->setText("Surface");
-    m_surfaceToggleButtons[i]->setMaximumHeight(25);
-    theme.applyTextColor(m_surfaceToggleButtons[i], topButtonStyle);
-    connect(m_surfaceToggleButtons[i], &QPushButton::clicked, this,
-            [this, i]() { onSurfaceToggleClicked(i); });
-    m_surfaceToggleButtons[i]->setVisible(false); // Hidden by default, shown only in 3D view
-    m_surfaceToggleButtons[i]->raise();
-
     // Export button (for 3D view only - VisionPro USDZ export)
     m_exportButtons[i] = new QPushButton(m_viewContainers[i]);
     m_exportButtons[i]->setText("Export");
@@ -5912,37 +5902,7 @@ void DicomViewer::update3DView(int viewIndex) {
   }
   m_3dWidgets[viewIndex]->setStructureLines(lines3D);
 
-  if (m_structureSurfacesDirty) {
-    regenerateStructureSurfaceCache();
-  }
-
-  QVector<StructureSurface> structureSurfaces;
-  if (m_rtstructLoaded && isVolumeLoaded()) {
-    int roiCount = m_rtstruct.roiCount();
-    int cachedCount = m_cachedStructureSurfaces.size();
-    for (int r = 0; r < roiCount && r < cachedCount; ++r) {
-      if (!m_rtstruct.isROIVisible(r)) {
-        continue;
-      }
-
-      auto &surface = m_cachedStructureSurfaces[r];
-      if (surface.isEmpty()) {
-        QVector<QVector<QVector3D>> contours = m_rtstruct.roiContoursPatient(r);
-        if (!contours.isEmpty()) {
-          QColor roiColor = QColor::fromHsv((r * 40) % 360, 255, 255, 255);
-          surface.setColor(roiColor);
-          surface.setOpacity(0.3f);
-          surface.generateFromContours(contours, m_volume);
-          surface.transformTo3DWidgetSpace(m_volume);
-        }
-      }
-
-      if (!surface.isEmpty()) {
-        structureSurfaces.append(surface);
-      }
-    }
-  }
-  m_3dWidgets[viewIndex]->setStructureSurfaces(structureSurfaces);
+  m_3dWidgets[viewIndex]->setStructureSurfaces(QVector<StructureSurface>());
 
   // Build separate lists for time>0 and ==0 to enforce coloring.
   // Map patient coordinates to 3D widget's centered-mm space
@@ -6730,12 +6690,6 @@ void DicomViewer::updateSliderPosition() {
         m_lineToggleButtons[viewIndex]->raise();
         x2 += m_lineToggleButtons[viewIndex]->width() + 4;
       }
-      if (m_surfaceToggleButtons[viewIndex] &&
-          m_surfaceToggleButtons[viewIndex]->isVisible()) {
-        m_surfaceToggleButtons[viewIndex]->move(x2, secondRowY);
-        m_surfaceToggleButtons[viewIndex]->raise();
-        x2 += m_surfaceToggleButtons[viewIndex]->width() + 4;
-      }
     }
     return maxHeight;
   };
@@ -6836,8 +6790,6 @@ void DicomViewer::updateInteractionButtonVisibility(int viewIndex) {
       m_imageToggleButtons[viewIndex]->hide();
     if (m_lineToggleButtons[viewIndex])
       m_lineToggleButtons[viewIndex]->hide();
-    if (m_surfaceToggleButtons[viewIndex])
-      m_surfaceToggleButtons[viewIndex]->hide();
     if (m_exportButtons[viewIndex])
       m_exportButtons[viewIndex]->hide();
     return;
@@ -6871,15 +6823,6 @@ void DicomViewer::updateInteractionButtonVisibility(int viewIndex) {
     m_lineToggleButtons[viewIndex]->setVisible(showLineToggle);
     if (showLineToggle) {
       m_lineToggleButtons[viewIndex]->adjustSize();
-    }
-  }
-
-  // Show Surface toggle button only in 3D view with RT Structure
-  if (m_surfaceToggleButtons[viewIndex]) {
-    bool showSurfaceToggle = m_is3DView[viewIndex] && hasImageContent && isVolumeLoaded() && m_rtstructLoaded;
-    m_surfaceToggleButtons[viewIndex]->setVisible(showSurfaceToggle);
-    if (showSurfaceToggle) {
-      m_surfaceToggleButtons[viewIndex]->adjustSize();
     }
   }
 
@@ -6955,13 +6898,11 @@ void DicomViewer::onImageToggleClicked(int viewIndex) {
   // Toggle visibility
   m_show3DImages[viewIndex] = !m_show3DImages[viewIndex];
   m_show3DLines[viewIndex] = !m_show3DLines[viewIndex];
-  m_show3DSurfaces[viewIndex] = !m_show3DSurfaces[viewIndex];
 
   // Update 3D widget
   if (m_3dWidgets[viewIndex]) {
     m_3dWidgets[viewIndex]->setShowImages(m_show3DImages[viewIndex]);
     m_3dWidgets[viewIndex]->setShowLines(m_show3DLines[viewIndex]);
-    m_3dWidgets[viewIndex]->setShowSurfaces(m_show3DSurfaces[viewIndex]);
   }
 }
 
@@ -6977,21 +6918,6 @@ void DicomViewer::onLineToggleClicked(int viewIndex) {
   // Update 3D widget
   if (m_3dWidgets[viewIndex]) {
     m_3dWidgets[viewIndex]->setShowLines(m_show3DLines[viewIndex]);
-  }
-}
-
-void DicomViewer::onSurfaceToggleClicked(int viewIndex) {
-  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
-    return;
-  if (!m_is3DView[viewIndex])
-    return;
-
-  // Toggle Surface visibility only
-  m_show3DSurfaces[viewIndex] = !m_show3DSurfaces[viewIndex];
-
-  // Update 3D widget
-  if (m_3dWidgets[viewIndex]) {
-    m_3dWidgets[viewIndex]->setShowSurfaces(m_show3DSurfaces[viewIndex]);
   }
 }
 
@@ -9585,7 +9511,7 @@ void DicomViewer::setViewTo3D(int viewIndex) {
   if (m_3dWidgets[viewIndex]) {
     m_3dWidgets[viewIndex]->setShowImages(m_show3DImages[viewIndex]);
     m_3dWidgets[viewIndex]->setShowLines(m_show3DLines[viewIndex]);
-    m_3dWidgets[viewIndex]->setShowSurfaces(m_show3DSurfaces[viewIndex]);
+    m_3dWidgets[viewIndex]->setShowSurfaces(false);
   }
   updateDoseShiftLabels();
   updateInteractionButtonVisibility(viewIndex);
