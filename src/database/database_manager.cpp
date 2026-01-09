@@ -232,16 +232,6 @@ CREATE TABLE IF NOT EXISTS files (
     UNIQUE(study_id, relative_path),
     FOREIGN KEY(study_id) REFERENCES studies(id) ON DELETE CASCADE
 );
-CREATE TABLE IF NOT EXISTS CyberKnifeBeamData (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    data_type TEXT NOT NULL,
-    collimator_size REAL,
-    depth REAL,
-    radius REAL,
-    factor_value REAL NOT NULL,
-    file_source TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
     )SQL";
         schemaOk = exec(fallback);
     }
@@ -271,7 +261,7 @@ CREATE TABLE IF NOT EXISTS CyberKnifeBeamData (
     if (!exec("DROP INDEX IF EXISTS idx_studies_unique;")) return false;
     if (!exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_studies_unique ON studies(patient_key, modality, path, series_uid);")) return false;
 
-    // Ensure dose_volumes table exists (added for CyberKnife dose storage)
+    // Ensure dose_volumes table exists
     const char* doseVolumesSql = R"SQL(
 CREATE TABLE IF NOT EXISTS dose_volumes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

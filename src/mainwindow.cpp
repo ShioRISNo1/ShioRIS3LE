@@ -18,7 +18,6 @@ MainWindow::MainWindow(QWidget *parent)
   setupUI();
   setupMenus();
   setupStatusBar();
-  initializeCyberKnifeDoseCalculator();
 
   // ウィンドウ設定
   setMinimumSize(800, 600);
@@ -57,7 +56,6 @@ void MainWindow::setupUI() {
   // 中央ウィジェットとしてDICOMビューアーを設定
   m_dicomViewer = new DicomViewer(this);
   setCentralWidget(m_dicomViewer);
-  m_dicomViewer->setCyberKnifeDoseCalculator(&m_cyberKnifeDoseCalculator);
   m_dicomViewer->setDatabaseManager(&m_dbManager);
 
   // シグナル・スロット接続
@@ -102,13 +100,6 @@ void MainWindow::setupMenus() {
   connect(m_openRTStructAction, &QAction::triggered, this,
           &MainWindow::openRTStructFile);
 
-  m_loadCyberKnifeBeamDataAction =
-      new QAction(tr("Load &CyberKnife Beam Data..."), this);
-  m_loadCyberKnifeBeamDataAction->setStatusTip(
-      tr("Load CyberKnife beam data from a directory"));
-  connect(m_loadCyberKnifeBeamDataAction, &QAction::triggered, this,
-          &MainWindow::loadCyberKnifeBeamData);
-
   m_exitAction = new QAction("E&xit", this);
   m_exitAction->setShortcut(QKeySequence::Quit);
   m_exitAction->setStatusTip("Exit the application");
@@ -120,22 +111,6 @@ void MainWindow::setupMenus() {
   m_fileMenu->addAction(m_openVolumeAction);
   m_fileMenu->addAction(m_openRTDoseAction);
   m_fileMenu->addAction(m_openRTStructAction);
-  m_fileMenu->addSeparator();
-  m_fileMenu->addAction(m_loadCyberKnifeBeamDataAction);
-
-  m_cyberKnifeExportMenu = m_fileMenu->addMenu(tr("Export &CyberKnife Data"));
-  m_exportCyberKnifeCsvAction = m_cyberKnifeExportMenu->addAction(
-      tr("Export &Beam Data Bundle (CSV)..."));
-  connect(m_exportCyberKnifeCsvAction, &QAction::triggered, this,
-          &MainWindow::exportCyberKnifeCsvBundle);
-  m_exportCyberKnifeCsvAction->setStatusTip(
-      tr("Export DM, OCR, and TMR tables to timestamped CSV files"));
-
-  m_cyberKnifeMenu = m_menuBar->addMenu(tr("&CyberKnife"));
-  m_cyberKnifeMenu->addAction(m_loadCyberKnifeBeamDataAction);
-  m_cyberKnifeMenu->addSeparator();
-  m_cyberKnifeMenu->addAction(m_exportCyberKnifeCsvAction);
-
   m_fileMenu->addSeparator();
   m_fileMenu->addAction(m_exitAction);
 
@@ -259,8 +234,6 @@ void MainWindow::setupMenus() {
           &MainWindow::aboutApplication);
 
   m_helpMenu->addAction(m_aboutAction);
-
-  updateCyberKnifeExportActions();
 }
 
 void MainWindow::showDataWindow() {
@@ -440,9 +413,6 @@ void MainWindow::setupStatusBar() {
   m_statusLabel = new QLabel("Ready");
   m_statusBar->addWidget(m_statusLabel);
 
-  m_cyberKnifeStatusLabel = new QLabel(tr("CyberKnife: 未ロード"));
-  m_statusBar->addWidget(m_cyberKnifeStatusLabel);
-
   // Window/Level表示
   m_windowLevelLabel = new QLabel("W/L: -/-");
   m_statusBar->addPermanentWidget(m_windowLevelLabel);
@@ -451,160 +421,6 @@ void MainWindow::setupStatusBar() {
   m_progressBar = new QProgressBar();
   m_progressBar->setVisible(false);
   m_statusBar->addPermanentWidget(m_progressBar);
-}
-
-void MainWindow::initializeCyberKnifeDoseCalculator() {
-  if (m_cyberKnifeDoseCalculator.isReady())
-    return;
-
-  if (m_cyberKnifeDoseCalculator.initialize(QString())) {
-    if (m_statusBar) {
-      QSettings settings("ShioRIS3", "ShioRIS3");
-      const QString resolvedPath =
-          settings.value("cyberknife/beamDataPath").toString();
-      if (!resolvedPath.isEmpty()) {
-        const QString displayPath =
-            QDir::toNativeSeparators(resolvedPath);
-        m_statusBar->showMessage(
-            tr("CyberKnife beam data loaded: %1").arg(displayPath), 5000);
-      }
-    }
-  }
-
-  if (m_dicomViewer)
-    m_dicomViewer->refreshCyberKnifeCalculatorState();
-
-  updateCyberKnifeExportActions();
-}
-
-void MainWindow::loadCyberKnifeBeamData() {
-  QSettings settings("ShioRIS3", "ShioRIS3");
-  const QString lastPath = settings.value("cyberknife/beamDataPath").toString();
-  const QString initialDir = lastPath.isEmpty() ? QDir::homePath() : lastPath;
-
-  const QString selectedDir = QFileDialog::getExistingDirectory(
-      this, tr("Select CyberKnife Beam Data Directory"), initialDir,
-      QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-
-  if (selectedDir.isEmpty()) {
-    return;
-  }
-
-  m_statusLabel->setText(tr("Loading CyberKnife beam data..."));
-  m_statusBar->showMessage(tr("Loading CyberKnife beam data..."));
-  if (m_cyberKnifeStatusLabel) {
-    m_cyberKnifeStatusLabel->setText(tr("CyberKnife: 読み込み中..."));
-  }
-
-  QApplication::setOverrideCursor(Qt::WaitCursor);
-  const bool loaded = m_cyberKnifeDoseCalculator.initialize(selectedDir);
-  QApplication::restoreOverrideCursor();
-
-  if (loaded) {
-    QSettings updatedSettings("ShioRIS3", "ShioRIS3");
-    const QString resolvedPath =
-        updatedSettings.value("cyberknife/beamDataPath").toString();
-    const QString displayPath =
-        QDir::toNativeSeparators(resolvedPath.isEmpty() ? selectedDir
-                                                        : resolvedPath);
-    const QString exportHint =
-        tr("CSV出力は「CyberKnife」メニュー、または"
-           "「ファイル > Export CyberKnife Data」から実行できます。");
-
-    m_statusLabel->setText(tr("CyberKnife beam data ready"));
-    m_statusBar->showMessage(
-        tr("CyberKnife beam data loaded: %1").arg(displayPath), 5000);
-    QMessageBox::information(
-        this, tr("CyberKnife Beam Data"),
-        tr("CyberKnife beam data was loaded successfully from:\n%1\n\n%2")
-            .arg(displayPath, exportHint));
-  } else {
-    m_statusLabel->setText(tr("Failed to load CyberKnife beam data"));
-    m_statusBar->showMessage(tr("Failed to load CyberKnife beam data"), 5000);
-    const QStringList errors = m_cyberKnifeDoseCalculator.lastErrors();
-    const QString errorDetails = errors.join(QStringLiteral("\n"));
-    QString message = tr("Failed to load CyberKnife beam data from:\n%1\n\nVerify that the "
-                        "directory contains DMTable.dat, TMRtable.dat, and "
-                        "OCRtable*.dat files.")
-                           .arg(QDir::toNativeSeparators(selectedDir));
-    if (!errorDetails.isEmpty()) {
-      message.append(QStringLiteral("\n\n"));
-      message.append(errorDetails);
-    }
-    QMessageBox::warning(this, tr("CyberKnife Beam Data"), message);
-  }
-  updateCyberKnifeExportActions();
-  if (!loaded && m_cyberKnifeStatusLabel) {
-    m_cyberKnifeStatusLabel->setText(tr("CyberKnife: 読み込み失敗"));
-  }
-  if (m_dicomViewer)
-    m_dicomViewer->refreshCyberKnifeCalculatorState();
-}
-
-void MainWindow::exportCyberKnifeCsvBundle() {
-  const CyberKnife::BeamDataManager *manager =
-      m_cyberKnifeDoseCalculator.beamDataManager();
-  if (!manager || !m_cyberKnifeDoseCalculator.isReady()) {
-    QMessageBox::warning(this, tr("Export CyberKnife Data"),
-                         tr("CyberKnifeのビームデータが読み込まれていません。"));
-    return;
-  }
-
-  QSettings settings("ShioRIS3", "ShioRIS3");
-  const QString defaultDir = settings
-                                  .value("cyberknife/lastExportDir",
-                                         settings.value("cyberknife/beamDataPath",
-                                                        QDir::homePath()))
-                                  .toString();
-
-  const QString targetDir = QFileDialog::getExistingDirectory(
-      this, tr("Export CyberKnife Beam Data (CSV)"), defaultDir,
-      QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-  if (targetDir.isEmpty()) {
-    return;
-  }
-
-  settings.setValue("cyberknife/lastExportDir", targetDir);
-
-  QStringList exportedFiles;
-  const bool ok = manager->exportAllDataToCsv(targetDir, &exportedFiles);
-
-  QStringList displayPaths;
-  displayPaths.reserve(exportedFiles.size());
-  for (const QString &path : exportedFiles) {
-    displayPaths.append(QDir::toNativeSeparators(path));
-  }
-
-  if (ok) {
-    const QString detail = displayPaths.isEmpty()
-                               ? QDir::toNativeSeparators(targetDir)
-                               : displayPaths.join(QStringLiteral("\n"));
-    QMessageBox::information(
-        this, tr("Export CyberKnife Data"),
-        tr("以下のCSVファイルを出力しました:\n%1").arg(detail));
-  } else {
-    QString message = tr("CyberKnife CSVの出力に失敗しました。");
-    if (!displayPaths.isEmpty()) {
-      message.append(QStringLiteral("\n\n"));
-      message.append(tr("成功したファイル:\n%1")
-                         .arg(displayPaths.join(QStringLiteral("\n"))));
-    }
-    QMessageBox::warning(this, tr("Export CyberKnife Data"), message);
-  }
-}
-
-void MainWindow::updateCyberKnifeExportActions() {
-  const bool ready = m_cyberKnifeDoseCalculator.isReady();
-  if (m_cyberKnifeExportMenu) {
-    m_cyberKnifeExportMenu->setEnabled(ready);
-  }
-  if (m_exportCyberKnifeCsvAction) {
-    m_exportCyberKnifeCsvAction->setEnabled(ready);
-  }
-  if (m_cyberKnifeStatusLabel) {
-    m_cyberKnifeStatusLabel->setText(
-        ready ? tr("CyberKnife: CSV出力可") : tr("CyberKnife: 未ロード"));
-  }
 }
 
 void MainWindow::updateTextThemeSelection(ThemeManager::TextTheme theme) {

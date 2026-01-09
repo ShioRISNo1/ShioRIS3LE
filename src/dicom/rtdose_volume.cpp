@@ -2073,7 +2073,7 @@ bool RTDoseVolume::saveToFile(const QString& filename,
 
     // General Equipment Module (optional but recommended)
     dataset->putAndInsertString(DCM_Manufacturer, "ShioRIS3");
-    dataset->putAndInsertString(DCM_ManufacturerModelName, "CyberKnife Dose Calculator");
+    dataset->putAndInsertString(DCM_ManufacturerModelName, "ShioRIS3 Dose Calculator");
     dataset->putAndInsertString(DCM_SoftwareVersions, "1.0");
 
     // General Image Module

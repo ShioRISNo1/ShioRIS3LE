@@ -4,8 +4,6 @@
 #include "visualization/collapsible_group_box.h"
 #include "visualization/opengl_3d_widget.h"
 #include "visualization/opengl_image_widget.h"
-#include "cyberknife/dose_calculator.h"
-#include "cyberknife/geometry_calculator.h"
 #include "brachy/brachy_dose_calculator.h"
 #include "brachy/dwell_time_optimizer.h"
 #include <QCheckBox>
@@ -81,10 +79,6 @@ class MultiRowTabWidget;
 class GammaAnalysisWindow;
 class DatabaseManager;
 
-namespace CyberKnife {
-class CyberKnifeDoseCalculator;
-}
-
 // 線量変換モード
 enum class DoseCalcMode {
   Physical, // 物理線量
@@ -152,10 +146,7 @@ public:
   bool loadRTDoseFile(const QString &filename, bool activate = true);
   bool loadRTStructFile(const QString &filename);
   bool loadBrachyPlanFile(const QString &filename);
-  void setCyberKnifeDoseCalculator(
-      CyberKnife::CyberKnifeDoseCalculator *calculator);
   void setDatabaseManager(DatabaseManager *dbManager);
-  void refreshCyberKnifeCalculatorState();
   void setWindowLevel(double window, double level);
   void showNextImage();
   void showPreviousImage();
@@ -248,10 +239,6 @@ private slots:
   void onImageDoubleClicked(int viewIndex);
   void onSlicePositionToggled(bool checked);
   void onExportButtonClicked(int viewIndex);
-  void onLoadCyberKnifeXml();
-  void onCyberKnifeDoseCalcClicked();
-  void onCyberKnifeCancelClicked();
-  void onCyberKnifeDoseCalculationFinished();
   void onGenerateQr();
   void onDecodeQrFromImage();
   void onSaveQrImage();
@@ -273,12 +260,6 @@ protected:
 
 private:
   void setupUI();
-  bool loadCyberKnifeXml(const QString &filePath, QString *errorMessage);
-  void updateCyberKnifeUiState();
-  void updateCyberKnifeDensityModelText();
-  void applyCyberKnifeResolutionSettings();
-  void applyCyberKnifeDoseModel();
-  void applyPlanDensityModelToCalculator();
   void setBrachyStatusStyle(const QString &borderColor);
   void updateImage();
   void updateImage(int viewIndex, bool updateStructure = true);
@@ -484,7 +465,6 @@ private:
   QPushButton *m_randomStudyButton{nullptr};
   class WebServer *m_webServer{nullptr};
   QWidget *m_qrPanel{nullptr};
-  QWidget *m_cyberknifePanel{nullptr};
   QPlainTextEdit *m_qrTextEdit{nullptr};
   QCheckBox *m_qrEscapeCheck{nullptr};
   QCheckBox *m_qrUtf8EciCheck{nullptr};
@@ -526,20 +506,6 @@ private:
   QListWidget *m_brachyRefPointsList{nullptr};
   QCheckBox *m_brachyShowRefPointsCheck{nullptr};
 
-  QPushButton *m_cyberknifeLoadButton{nullptr};
-  QPlainTextEdit *m_cyberknifeTextBox{nullptr};
-  QPlainTextEdit *m_cyberknifeOcrTextBox{nullptr};
-  QPlainTextEdit *m_cyberknifeDensityTextBox{nullptr};
-  QComboBox *m_cyberknifeModelCombo{nullptr};
-  QComboBox *m_cyberknifeStepXYCombo{nullptr};
-  QComboBox *m_cyberknifeStepZCombo{nullptr};
-  QCheckBox *m_cyberknifeDynamicGridCheckBox{nullptr};
-  QDoubleSpinBox *m_cyberknifeDynamicThresholdStep2SpinBox{nullptr};
-  QDoubleSpinBox *m_cyberknifeDynamicThresholdStep1SpinBox{nullptr};
-#ifdef ENABLE_GPU_DOSE_CALCULATION
-  QCheckBox *m_cyberknifeGpuEnableCheckBox{nullptr};
-  QLabel *m_cyberknifeGpuStatusLabel{nullptr};
-#endif
 
   // Window/Level controls
   CollapsibleGroupBox *m_windowLevelGroup;
@@ -605,19 +571,12 @@ private:
   QStringList m_dicomFiles;
   QString m_ctFilename;
   QString m_rtDoseFilename;
-  QString m_lastCyberKnifeDir;
   int m_currentIndices[VIEW_COUNT];
   int m_activeViewIndex{0};
 
   DicomVolume m_volume;
   RTDoseVolume m_doseVolume;
   DoseResampledVolume m_resampledDose;
-  struct CyberKnifeDoseResult {
-    bool success{false};
-    DoseResampledVolume volume;
-    RTDoseVolume dose;
-    QStringList errors;
-  };
   struct BrachyDoseResult {
     bool success{false};
     RTDoseVolume dose;
@@ -633,34 +592,7 @@ private:
     QString savedFilePath; // file path if saved
   };
   std::vector<DoseItem> m_doseItems;
-  CyberKnife::CyberKnifeDoseCalculator *m_cyberKnifeDoseCalculator{nullptr};
   DatabaseManager *m_databaseManager{nullptr};
-  QPushButton *m_cyberknifeDoseCalcButton{nullptr};
-  QPushButton *m_cyberknifeCancelButton{nullptr};
-  QProgressBar *m_cyberknifeProgressBar{nullptr};
-  QLabel *m_cyberknifeStatusLabel{nullptr};
-  QVector<CyberKnife::GeometryCalculator::BeamGeometry>
-      m_cyberknifeBeamGeometries;
-  QVector<double> m_cyberknifeBeamWeights;
-  bool m_cyberknifeCalculating{false};
-  std::atomic<bool> m_cyberknifeCancelRequested{false};
-  QFutureWatcher<CyberKnifeDoseResult> *m_cyberknifeDoseWatcher{nullptr};
-  int m_cyberknifeStepXY{1};
-  int m_cyberknifeStepZ{1};
-  bool m_cyberknifeDynamicGridMode{true};
-  CyberKnife::CyberKnifeDoseCalculator::DoseModel m_cyberknifeDoseModel{
-      CyberKnife::CyberKnifeDoseCalculator::DoseModel::RayTracing};
-  struct CyberKnifePlanDensityModelInfo {
-    bool valid{false};
-    bool applied{false};
-    QString name;
-    QString type;
-    QString typeValue;
-    QString version;
-    QStringList warnings;
-    CyberKnife::CyberKnifeDoseCalculator::DensityTableInfo table;
-  };
-  CyberKnifePlanDensityModelInfo m_cyberknifePlanDensityModel;
   bool m_doseLoaded{false};
   bool m_doseVisible{true};
   RTStructureSet m_rtstruct;
