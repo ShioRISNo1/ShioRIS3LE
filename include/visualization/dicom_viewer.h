@@ -11,7 +11,6 @@
 #include <QColor>
 #include <QCursor>
 #include <QDoubleSpinBox>
-#include <QElapsedTimer>
 #include <QEvent>
 #include <QFormLayout>
 #include <QFutureWatcher>
@@ -57,11 +56,6 @@
 #include <vector>
 
 class QProgressBar;
-
-// Forward declaration to avoid heavy header include
-namespace cv {
-class VideoCapture;
-}
 
 #include "dicom/brachy_plan.h"
 #include "dicom/dicom_reader.h"
@@ -239,13 +233,6 @@ private slots:
   void onImageDoubleClicked(int viewIndex);
   void onSlicePositionToggled(bool checked);
   void onExportButtonClicked(int viewIndex);
-  void onGenerateQr();
-  void onDecodeQrFromImage();
-  void onSaveQrImage();
-  void onClearQr();
-  void onStartQrCamera();
-  void onStopQrCamera();
-  void onQrCameraTick();
 
 protected:
   void wheelEvent(QWheelEvent *event) override;
@@ -464,24 +451,6 @@ private:
   QListWidget *m_doseListWidget{nullptr};
   QPushButton *m_randomStudyButton{nullptr};
   class WebServer *m_webServer{nullptr};
-  QWidget *m_qrPanel{nullptr};
-  QPlainTextEdit *m_qrTextEdit{nullptr};
-  QCheckBox *m_qrEscapeCheck{nullptr};
-  QCheckBox *m_qrUtf8EciCheck{nullptr};
-  QPushButton *m_qrGenerateButton{nullptr};
-  QPushButton *m_qrDecodeImageButton{nullptr};
-  QPushButton *m_qrSaveButton{nullptr};
-  QPushButton *m_qrClearButton{nullptr};
-  QLabel *m_qrImageLabel{nullptr};
-  QPushButton *m_qrStartCamButton{nullptr};
-  QPushButton *m_qrStopCamButton{nullptr};
-  QTimer *m_qrCamTimer{nullptr};
-  bool m_qrCamRunning{false};
-  std::unique_ptr<cv::VideoCapture> m_qrCapture;
-  QImage m_lastQrImage;
-  QCheckBox *m_qrHighAccuracyCheck{nullptr};
-  QElapsedTimer m_qrTimer;
-  int m_qrDecodeIntervalMs{200};
   QWidget *m_brachyPanel{nullptr};
   QPushButton *m_brachyReadButton{nullptr};
   QListWidget *m_brachyListWidget{nullptr};
