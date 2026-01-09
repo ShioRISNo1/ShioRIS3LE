@@ -27,9 +27,7 @@
 #include "database/database_sync_manager.h"
 #include "data/metadata_generator.h"
 #include "visualization/data_window.h"
-#include "visualization/auto_segmentation_dialog.h"
 #include "visualization/fusion_dialog.h"
-#include "visualization/translator_window.h"
 #include "cyberknife/dose_calculator.h"
 #include "theme_manager.h"
 
@@ -59,15 +57,8 @@ private slots:
     void setDualView();
     void setQuadView();
     void setFiveView();
-    void startAutoSegmentation();
     void openFusionDialog();
     void selectCustomTextColor();
-
-//    void startAutoSegmentation();
-    void applySegmentationResult(const cv::Mat &segmentationResult);
-    void onSegmentationFinished(const cv::Mat &result);
-
-  //  void startAutoSegmentation();
 
 private:
     void setupUI();
@@ -76,14 +67,6 @@ private:
     void initializeCyberKnifeDoseCalculator();
     void updateWindowTitle(const QString& filename = QString());
     void showDataWindow();
-    void showTranslatorWindow();
-
-    QString getVolumeInfoString(const cv::Mat &volume);
-    QString getSegmentationStatsString(const cv::Mat &segmentation);
-    void showSegmentationStatistics(const cv::Mat &segmentation);
-
-    void showAIFeaturesDialog();
-    void showAIUsageGuide();
 
     QString getVolumeInfoString();
     void updateCyberKnifeExportActions();
@@ -97,7 +80,6 @@ private:
     QMenu* m_fileMenu;
     QMenu* m_cyberKnifeExportMenu{nullptr};
     QMenu* m_cyberKnifeMenu{nullptr};
-    QMenu* m_aiMenu;
     QMenu* m_appearanceMenu{nullptr};
     QMenu* m_textColorMenu{nullptr};
     QMenu* m_databaseMenu;
@@ -118,14 +100,12 @@ private:
     QAction* m_dualViewAction;
     QAction* m_quadViewAction;
     QAction* m_fiveViewAction;
-    QAction* m_autoSegmentationAction;
     QAction* m_openDatabaseAction;
     QAction* m_openFusionDialogAction;
     QAction* m_textColorWhiteAction{nullptr};
     QAction* m_textColorGreenAction{nullptr};
     QAction* m_textColorDarkRedAction{nullptr};
     QAction* m_textColorCustomAction{nullptr};
-    QAction* m_openTranslatorAction{nullptr};
     
     // Status bar
     QStatusBar* m_statusBar;
@@ -137,9 +117,7 @@ private:
 
     VolumeViewerWindow* m_volumeWindow;
     DataWindow* m_dataWindow{nullptr};
-    AutoSegmentationDialog* m_autoSegDialog{nullptr};
     FusionDialog* m_fusionDialog{nullptr};
-    TranslatorWindow* m_translatorWindow{nullptr};
 
     QString m_currentFilename;
 

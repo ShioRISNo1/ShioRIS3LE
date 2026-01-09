@@ -74,15 +74,11 @@ class VideoCapture;
 #include "dicom/rtdose_volume.h"
 #include "dicom/rtstruct.h"
 #include "visualization/dvh_window.h"
-#ifdef USE_ONNXRUNTIME
-#include "ai/onnx_segmenter.h"
-#endif
 
 class DoseItemWidget;
 class DoseProfileWindow;
 class MultiRowTabWidget;
 class GammaAnalysisWindow;
-class LmStudioClient;
 class DatabaseManager;
 
 namespace CyberKnife {
@@ -183,25 +179,7 @@ public:
   }
   bool isSyncScale() const { return m_syncScale; }
 
-      cv::Mat getCurrentVolume() const;
-  cv::Mat getSegmentationVolumeRaw() const;
-#ifdef USE_ONNXRUNTIME
-  OnnxSegmenter* getSegmentationModel() const;
-
-  /**
-   * @brief OnnxSegmenterにRTSS Structure bounding boxを適用
-   * @details m_useStructureBoundingBoxがtrueの場合、選択されたStructureの
-   *          bounding boxをOnnxSegmenterに設定します。
-   */
-  void applyBoundingBoxToSegmenter();
-  bool applySegmentationVolume(const cv::Mat &labels,
-                               QString *structureSummary = nullptr);
-#endif
-    bool applySegmentationOverlay(const cv::Mat &segmentation);
-    void setSegmentationPreview(const cv::Mat &segmentation);
-  void clearSegmentationOverlay();
-  void setSegmentationOpacity(float opacity);
-  void toggleSegmentationVisibility(bool visible);
+  cv::Mat getCurrentVolume() const;
 
   void setFusionPreviewImage(const QImage &image, double spacingX,
                              double spacingY);
@@ -274,13 +252,6 @@ private slots:
   void onCyberKnifeDoseCalcClicked();
   void onCyberKnifeCancelClicked();
   void onCyberKnifeDoseCalculationFinished();
-#ifdef USE_ONNXRUNTIME
-  void onLoadSegmentationModel();
-  void onRunSegmentation();
-  void onSegmentationLabelToggled(QListWidgetItem *item);
-  void onStructureSelectionChanged(int index);
-  void updateStructureComboBox();
-#endif
   void onGenerateQr();
   void onDecodeQrFromImage();
   void onSaveQrImage();
@@ -288,21 +259,6 @@ private slots:
   void onStartQrCamera();
   void onStopQrCamera();
   void onQrCameraTick();
-  void onAiSendPrompt();
-  void onAiExecutePendingCommands();
-  void onAiAutoExecuteToggled(bool checked);
-  void onAiMacroSaveRequested();
-  void onAiMacroDeleteRequested();
-  void onAiMacroRunRequested();
-  void onAiMacroExportRequested();
-  void onAiMacroImportRequested();
-  void onAiRequestStarted();
-  void onAiRequestFinished(const QString &text);
-  void onAiRequestError(const QString &errorMessage);
-  void onAiEndpointEditingFinished();
-  void onAiModelsReceived(const QStringList &models);
-  void onAiModelsFetchFailed(const QString &errorMessage);
-  void onAiModelChanged(int index);
 
 protected:
   void wheelEvent(QWheelEvent *event) override;
@@ -526,49 +482,7 @@ private:
   QWidget *m_doseManagerPanel{nullptr};
   QListWidget *m_doseListWidget{nullptr};
   QPushButton *m_randomStudyButton{nullptr};
-  QWidget *m_aiSegPanel{nullptr};
-  QWidget *m_aiControlPanel{nullptr};
-  QPlainTextEdit *m_aiPromptEdit{nullptr};
-  QPlainTextEdit *m_aiSystemPromptEdit{nullptr};
-  QPlainTextEdit *m_aiLogView{nullptr};
-  QLineEdit *m_aiEndpointEdit{nullptr};
-  QComboBox *m_aiModelCombo{nullptr};
-  QPushButton *m_aiSendButton{nullptr};
-  QPushButton *m_aiExecuteButton{nullptr};
-  QLabel *m_aiStatusLabel{nullptr};
-  QCheckBox *m_aiAutoExecuteCheck{nullptr};
-  QTreeWidget *m_aiCommandList{nullptr};
-  QComboBox *m_aiMacroCombo{nullptr};
-  QPushButton *m_aiMacroSaveButton{nullptr};
-  QPushButton *m_aiMacroDeleteButton{nullptr};
-  QPushButton *m_aiMacroRunButton{nullptr};
-  QPushButton *m_aiMacroExportButton{nullptr};
-  QPushButton *m_aiMacroImportButton{nullptr};
-
-  QJsonArray m_pendingAiCommands;
-  QJsonArray m_lastAiCommandSequence;
-  QVector<AiCommandStep> m_aiCommandSteps;
-  QVector<QTreeWidgetItem *> m_aiCommandItems;
-  bool m_aiExecutingCommands{false};
-  bool m_aiHasDicomSource{false};
-  bool m_aiCurrentDicomSourceIsDirectory{false};
-  QString m_aiCurrentDicomSourcePath;
-  bool m_aiSuppressSourceTracking{false};
-  struct AiMacroDefinition {
-    QJsonArray commands;
-    QString description;
-    QStringList parameterHints;
-  };
-  QMap<QString, AiMacroDefinition> m_aiMacros;
-  LmStudioClient *m_lmStudioClient{nullptr};
   class WebServer *m_webServer{nullptr};
-  bool m_aiRequestInFlight{false};
-  QStringList m_availableAiModels;
-  QString m_aiPreferredModel;
-  QString m_lastAiEndpoint;
-  bool m_aiModelsLoading{false};
-  QHash<QString, int> m_aiPromptFailureCounters;
-  QHash<QString, QString> m_aiPromptFailureDetails;
   QWidget *m_qrPanel{nullptr};
   QWidget *m_cyberknifePanel{nullptr};
   QPlainTextEdit *m_qrTextEdit{nullptr};
@@ -626,30 +540,6 @@ private:
   QCheckBox *m_cyberknifeGpuEnableCheckBox{nullptr};
   QLabel *m_cyberknifeGpuStatusLabel{nullptr};
 #endif
-#ifdef USE_ONNXRUNTIME
-  QPushButton *m_loadSegModelButton{nullptr};
-  QPushButton *m_runSegButton{nullptr};
-  QCheckBox *m_showSegCheck{nullptr};
-  QLabel *m_loadedModelLabel{nullptr};
-  QComboBox *m_segQualityModeCombo{nullptr};
-  QComboBox *m_structureComboBox{nullptr};
-  QLineEdit *m_bboxXMinEdit{nullptr};
-  QLineEdit *m_bboxXMaxEdit{nullptr};
-  QLineEdit *m_bboxYMinEdit{nullptr};
-  QLineEdit *m_bboxYMaxEdit{nullptr};
-  QLineEdit *m_bboxZMinEdit{nullptr};
-  QLineEdit *m_bboxZMaxEdit{nullptr};
-#endif
-
-    cv::Mat m_segmentationOverlay;
-    cv::Mat m_segmentationPreview;
-    bool m_segmentationVisible;
-    float m_segmentationOpacity;
-    std::vector<QColor> m_segmentationColors;
-
-    void drawSegmentationOverlay(QPainter &painter, const QRect &imageRect);
-    QImage createSegmentationOverlayImage(const cv::Mat &segmentation, const QSize &size);
-    void initializeSegmentationColors();
 
   // Window/Level controls
   CollapsibleGroupBox *m_windowLevelGroup;
@@ -780,16 +670,6 @@ private:
   bool m_brachyLoaded{false};
   std::unique_ptr<Brachy::BrachyDoseCalculator> m_brachyDoseCalc;
   std::unique_ptr<Brachy::DwellTimeOptimizer> m_brachyOptimizer;
-#ifdef USE_ONNXRUNTIME
-  std::unique_ptr<OnnxSegmenter> m_segModel;
-  cv::Mat m_segmentationVolume;
-  bool m_segmentationReady{false};
-  QListWidget *m_segLabelList{nullptr};
-  QSet<int> m_visibleSegLabels;
-  QVector3D m_segBoundingBoxMin;
-  QVector3D m_segBoundingBoxMax;
-  bool m_useStructureBoundingBox{false};
-#endif
   QStackedLayout *m_viewStacks[VIEW_COUNT]{nullptr};
   QWidget *m_imagePanels[VIEW_COUNT]{nullptr};
   DVHWindow *m_dvhWidgets[VIEW_COUNT]{nullptr};
@@ -918,10 +798,6 @@ private:
   // Generic visualization grid overlay (mm-based)
   QCheckBox *m_gridCheck{nullptr};
   bool m_showGrid{false};
-
-#ifdef USE_ONNXRUNTIME
-  QImage colorizeSegmentationSlice(const cv::Mat &slice) const;
-#endif
 
   void initializeSeriesWindowLevel(int index, const QString &directory);
   bool ensureImageSeriesVolume(int index);
