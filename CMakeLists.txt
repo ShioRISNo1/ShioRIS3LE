@@ -308,7 +308,6 @@ set(SOURCES
     src/visualization/data_window.cpp
     src/visualization/fusion_dialog.cpp
     src/visualization/license_dialog.cpp
-    src/qrcodegen.cpp
     src/database/database_manager.cpp
     src/database/smart_scanner.cpp
     src/database/database_sync_manager.cpp
