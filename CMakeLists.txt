@@ -673,16 +673,6 @@ if(ENABLE_ONNXRUNTIME)
     list(APPEND SOURCES src/ai/segmentation_pipeline.cpp)
 endif()
 
-# Whisper音声認識機能の追加
-list(APPEND HEADERS include/ai/whisper_client.h)
-list(APPEND SOURCES src/ai/whisper_client.cpp)
-list(APPEND HEADERS include/ai/audio_recorder.h)
-list(APPEND SOURCES src/ai/audio_recorder.cpp)
-
-# whisper.cpp設定
-set(WHISPER_BUILD_TESTS OFF CACHE BOOL "Build whisper.cpp tests")
-set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "Build whisper.cpp examples")
-add_subdirectory(external/whisper.cpp)
 
 # リソースファイル
 set(RESOURCES
@@ -695,7 +685,6 @@ qt_add_executable(ShioRIS3 ${SOURCES} ${HEADERS} ${RESOURCES})
 # インクルードディレクトリ
 target_include_directories(ShioRIS3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/whisper.cpp
     ${OpenCV_INCLUDE_DIRS}
     ${DCMTK_INCLUDE_DIRS_PRIVATE}
 )
@@ -711,7 +700,6 @@ target_link_libraries(ShioRIS3 PRIVATE
     ${OpenCV_LIBS}
     ${DCMTK_LIBS}
     ${SHIO_SQLITE_TARGET}
-    whisper
 )
 
 if(APPLE)
@@ -896,13 +884,8 @@ if(UNIX AND NOT APPLE)
         target_compile_options(ShioRIS3 PRIVATE ${DCMTK_CFLAGS_OTHER})
     endif()
 
-    # RPATH設定（Whisper + ONNX Runtime）
+    # RPATH設定（ONNX Runtime）
     set(RPATH_DIRS "")
-
-    # Whisper library用のRPATH設定
-    # Whisperライブラリはビルドディレクトリ内に生成されるため、$ORIGINベースのパスを追加
-    list(APPEND RPATH_DIRS "$ORIGIN")
-    list(APPEND RPATH_DIRS "${CMAKE_BINARY_DIR}/external/whisper.cpp/src")
 
     # ONNX Runtime用のRPATH設定
     if(ENABLE_ONNXRUNTIME AND ONNXRUNTIME_FOUND)
@@ -921,6 +904,8 @@ if(UNIX AND NOT APPLE)
             BUILD_WITH_INSTALL_RPATH TRUE
         )
         message(STATUS "Linux RPATH configured: ${RPATH_DIRS}")
+    else()
+        message(STATUS "No RPATH configured for Linux")
     endif()
 endif()
 
@@ -961,9 +946,6 @@ if(APPLE)
         endif()
     endif()
 
-    # Whisperライブラリ用にFrameworksディレクトリもRPATHに追加
-    list(APPEND MAC_EXTRA_RPATHS "@executable_path/../Frameworks")
-
     if(MAC_EXTRA_RPATHS)
         list(REMOVE_DUPLICATES MAC_EXTRA_RPATHS)
         set_target_properties(ShioRIS3 PROPERTIES
@@ -977,33 +959,6 @@ if(APPLE)
     if(ACCELERATE_FRAMEWORK)
         target_link_libraries(ShioRIS3 PRIVATE ${ACCELERATE_FRAMEWORK})
     endif()
-
-    # ビルド後にWhisperとGGMLライブラリをFrameworksディレクトリにコピー
-    add_custom_command(TARGET ShioRIS3 POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks"
-        # Copy whisper library
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:whisper>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/"
-        # Copy all ggml-related libraries
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-base>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-cpu>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-blas>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-metal>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/"
-        COMMENT "Copying Whisper and GGML libraries to app bundle"
-    )
 
     # Copy logo image to app bundle Resources
     add_custom_command(TARGET ShioRIS3 POST_BUILD
@@ -1021,30 +976,6 @@ if(APPLE)
             "${CMAKE_SOURCE_DIR}/resources/images/ShioRIS3.icns"
             "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Resources/ShioRIS3.icns"
         COMMENT "Copying application icon to app bundle"
-    )
-
-    # libwhisper.dylibとすべてのlibggml*.dylibのrpathとシンボリックリンクを修正
-    add_custom_command(TARGET ShioRIS3 POST_BUILD
-        # Fix whisper library install name
-        COMMAND install_name_tool -id "@rpath/libwhisper.1.dylib"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/$<TARGET_FILE_NAME:whisper>"
-        # Create symlink for whisper: libwhisper.1.dylib -> actual library file
-        COMMAND ${CMAKE_COMMAND} -E create_symlink
-            "$<TARGET_FILE_NAME:whisper>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/libwhisper.1.dylib"
-        # Fix all ggml library install names
-        COMMAND install_name_tool -id "@rpath/$<TARGET_FILE_NAME:ggml>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/$<TARGET_FILE_NAME:ggml>"
-        COMMAND install_name_tool -id "@rpath/$<TARGET_FILE_NAME:ggml-base>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/$<TARGET_FILE_NAME:ggml-base>"
-        COMMAND install_name_tool -id "@rpath/$<TARGET_FILE_NAME:ggml-cpu>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/$<TARGET_FILE_NAME:ggml-cpu>"
-        COMMAND install_name_tool -id "@rpath/$<TARGET_FILE_NAME:ggml-blas>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/$<TARGET_FILE_NAME:ggml-blas>"
-        COMMAND install_name_tool -id "@rpath/$<TARGET_FILE_NAME:ggml-metal>"
-            "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Frameworks/$<TARGET_FILE_NAME:ggml-metal>"
-        COMMENT "Fixing library install names and creating symlinks"
-        VERBATIM
     )
 endif()
 
@@ -1080,26 +1011,8 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
          PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
 endif()
 
-# Linux: ビルド後にWhisperとGGML共有ライブラリを実行可能ファイルのディレクトリにコピー
+# Linux: Copy logo image to executable directory
 if(UNIX AND NOT APPLE)
-    add_custom_command(TARGET ShioRIS3 POST_BUILD
-        # Copy whisper library and create symlink
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:whisper>"
-            "$<TARGET_FILE_DIR:ShioRIS3>"
-        # Copy ggml libraries
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml>"
-            "$<TARGET_FILE_DIR:ShioRIS3>"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-base>"
-            "$<TARGET_FILE_DIR:ShioRIS3>"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-cpu>"
-            "$<TARGET_FILE_DIR:ShioRIS3>"
-        COMMENT "Copying Whisper and GGML libraries to executable directory"
-    )
-
     # Copy logo image to executable directory
     add_custom_command(TARGET ShioRIS3 POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -1111,28 +1024,8 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
-# Windows: ビルド後にWhisperとGGML DLLを実行可能ファイルのディレクトリにコピー
+# Windows: Copy logo image to executable directory
 if(WIN32)
-    add_custom_command(TARGET ShioRIS3 POST_BUILD
-        # Copy whisper.dll
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:whisper>"
-            "$<TARGET_FILE_DIR:ShioRIS3>"
-        # Copy ggml.dll
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml>"
-            "$<TARGET_FILE_DIR:ShioRIS3>"
-        # Copy ggml-base.dll if it exists
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-base>"
-            "$<TARGET_FILE_DIR:ShioRIS3>"
-        # Copy ggml-cpu.dll if it exists
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-cpu>"
-            "$<TARGET_FILE_DIR:ShioRIS3>"
-        COMMENT "Copying Whisper and GGML DLLs to executable directory"
-    )
-
     # Copy logo image to executable directory
     add_custom_command(TARGET ShioRIS3 POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory

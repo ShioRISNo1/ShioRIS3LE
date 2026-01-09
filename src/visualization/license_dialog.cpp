@@ -181,14 +181,6 @@ QString LicenseDialog::generateLicenseInfo()
     html += "<p class='note'>Note: Used when AI features are enabled.</p>";
     html += "</div>";
 
-    // whisper.cpp
-    html += "<div class='library'>";
-    html += "<h3>whisper.cpp</h3>";
-    html += "<p><span class='license-type'>License:</span> MIT License</p>";
-    html += "<p>whisper.cpp is a C/C++ implementation of OpenAI's Whisper speech recognition model.</p>";
-    html += "<p>Website: <a href='https://github.com/ggerganov/whisper.cpp'>https://github.com/ggerganov/whisper.cpp</a></p>";
-    html += "</div>";
-
     // OpenCL
     html += "<div class='library'>";
     html += "<h3>OpenCL</h3>";
