@@ -65,7 +65,6 @@
 class DoseItemWidget;
 class DoseProfileWindow;
 class MultiRowTabWidget;
-class GammaAnalysisWindow;
 class DatabaseManager;
 
 // 線量変換モード
@@ -194,7 +193,6 @@ private slots:
   void onDoseCalculateClicked();
   void onDoseIsosurfaceClicked();
   void onRandomStudyClicked();
-  void onGammaAnalysisClicked();
   void onDoseListContextMenu(const QPoint &pos);
   void onDoseSaveRequested(DoseItemWidget *widget);
   void onStructureVisibilityChanged(QListWidgetItem *item);
@@ -466,8 +464,6 @@ private:
   QDoubleSpinBox *m_doseAlphaBetaSpin{nullptr};
   QPushButton *m_doseCalcButton{nullptr};
   QPushButton *m_doseIsosurfaceButton{nullptr};
-  QPushButton *m_gammaAnalysisButton{nullptr};
-  GammaAnalysisWindow *m_gammaAnalysisWindow{nullptr};
   QVector<DoseIsosurface> m_doseIsosurfaces;
   double transformDose(double rawDose, double dataFr, double displayFr) const;
   QVector3D computeAlignmentShift(const RTDoseVolume &dose) const;
