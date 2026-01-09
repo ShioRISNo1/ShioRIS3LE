@@ -7367,11 +7367,12 @@ bool DicomViewer::ensureDvhDataReady(int roiIndex,
     return false;
   }
   if (roiIndex < 0 || roiIndex >= m_rtstruct.roiCount()) {
-                    .arg(roiIndex));
+    qWarning() << QString("Invalid ROI index for DVH request: %1").arg(roiIndex);
     return false;
   }
   if (m_dvhWatchers.contains(roiIndex)) {
-                    .arg(m_rtstruct.roiName(roiIndex)));
+    qWarning() << QString("DVH calculation already running for ROI: %1")
+                      .arg(m_rtstruct.roiName(roiIndex));
     return false;
   }
 
@@ -7387,7 +7388,9 @@ bool DicomViewer::ensureDvhDataReady(int roiIndex,
       data.isVisible = true;
       m_dvhData[roiIndex] = std::move(data);
     } catch (const std::exception &e) {
-                      .arg(QString::fromUtf8(e.what())));
+      qWarning() << QString("DVH calculation failed for ROI %1: %2")
+                        .arg(roiIndex)
+                        .arg(QString::fromUtf8(e.what()));
       return false;
     }
   } else {
@@ -7522,14 +7525,15 @@ bool DicomViewer::runDpsdAnalysis(const QString &roiName,
   }
   int roiIndex = findRoiIndex(roiName);
   if (roiIndex < 0) {
-                    .arg(roiName));
+    qWarning() << QString("Unknown ROI for DPSD analysis: %1").arg(roiName);
     return false;
   }
   int sampleIndex = -1;
   if (!sampleRoiName.trimmed().isEmpty()) {
     sampleIndex = findRoiIndex(sampleRoiName);
     if (sampleIndex < 0) {
-                      .arg(sampleRoiName));
+      qWarning() << QString("Unknown sample ROI for DPSD analysis: %1")
+                        .arg(sampleRoiName);
       return false;
     }
   }
@@ -7546,7 +7550,8 @@ bool DicomViewer::runDpsdAnalysis(const QString &roiName,
           mode, sampleIndex, nullptr);
     }
   } catch (const std::exception &e) {
-                    .arg(QString::fromUtf8(e.what())));
+    qWarning() << QString("DPSD analysis failed: %1")
+                      .arg(QString::fromUtf8(e.what()));
     return false;
   }
 
@@ -7845,8 +7850,6 @@ void DicomViewer::updateImage(int viewIndex, bool updateStructure) {
       }
     }
   }
-
-#ifdef USE_ONNXRUNTIME
 
   if (updateStructure) {
     StructureLineList sLines;
