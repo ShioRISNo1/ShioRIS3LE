@@ -3,7 +3,6 @@
 #include "export/usdz_exporter.h"
 #include "visualization/collapsible_group_box.h"
 #include "visualization/dose_profile_window.h"
-#include "visualization/gamma_analysis_window.h"
 #include "visualization/opengl_3d_widget.h"
 #include "visualization/opengl_image_widget.h"
 #include "visualization/random_study_dialog.h"
@@ -1681,8 +1680,6 @@ void DicomViewer::setupUI() {
   connect(m_doseListWidget, &QListWidget::customContextMenuRequested, this,
           &DicomViewer::onDoseListContextMenu);
   doseMgrLayout->addWidget(m_doseListWidget, 1);
-  m_gammaAnalysisButton = new QPushButton(tr("Gamma Analysis"));
-  doseMgrLayout->addWidget(m_gammaAnalysisButton);
   // Add Random Study button under the DoseList
   m_randomStudyButton = new QPushButton(tr("Random Study"));
   doseMgrLayout->addWidget(m_randomStudyButton);
@@ -1763,8 +1760,6 @@ void DicomViewer::setupUI() {
           &DicomViewer::onDoseCalculateClicked);
   connect(m_doseIsosurfaceButton, &QPushButton::clicked, this,
           &DicomViewer::onDoseIsosurfaceClicked);
-  connect(m_gammaAnalysisButton, &QPushButton::clicked, this,
-          &DicomViewer::onGammaAnalysisClicked);
   connect(m_randomStudyButton, &QPushButton::clicked, this,
           &DicomViewer::onRandomStudyClicked);
 
@@ -6569,40 +6564,6 @@ void DicomViewer::onRandomStudyClicked() {
   dlg->show();
   dlg->raise();
   dlg->activateWindow();
-}
-
-void DicomViewer::onGammaAnalysisClicked() {
-  if (!m_gammaAnalysisWindow) {
-    m_gammaAnalysisWindow = new GammaAnalysisWindow(this);
-    m_gammaAnalysisWindow->setWindowFlag(Qt::WindowStaysOnTopHint, true);
-  }
-
-  std::vector<GammaAnalysisWindow::DoseEntry> entries;
-  entries.reserve(m_doseItems.size());
-  for (const auto &item : m_doseItems) {
-    if (!item.widget)
-      continue;
-    GammaAnalysisWindow::DoseEntry entry;
-    entry.name = item.widget->name();
-    entry.dose = item.dose;
-    entry.dataFractions = item.widget->dataFractions();
-    entry.displayFractions = item.widget->displayFractions();
-    entry.factor = item.widget->factor();
-    entry.shift = computeAlignmentShift(item.dose) + item.widget->shift();
-    entries.push_back(entry);
-  }
-
-  if (entries.size() < 2) {
-    QMessageBox::warning(
-        this, tr("Gamma Analysis"),
-        tr("Please load at least two dose distributions."));
-  }
-
-  m_gammaAnalysisWindow->setDoseEntries(
-      entries, static_cast<int>(m_doseCalcMode), m_doseAlphaBeta);
-  m_gammaAnalysisWindow->show();
-  m_gammaAnalysisWindow->raise();
-  m_gammaAnalysisWindow->activateWindow();
 }
 
 double DicomViewer::transformDose(double rawDose, double dataFr,
