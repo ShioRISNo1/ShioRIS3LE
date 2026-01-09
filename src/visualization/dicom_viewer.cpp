@@ -1318,6 +1318,20 @@ DicomViewer::~DicomViewer() {
   }
 }
 
+void DicomViewer::setDatabaseManager(DatabaseManager *dbManager) {
+  m_databaseManager = dbManager;
+}
+
+void DicomViewer::setBrachyStatusStyle(const QString &borderColor) {
+  m_brachyStatusBorderColor = borderColor;
+  if (!m_brachyDataStatus)
+    return;
+  const QColor textColor = ThemeManager::instance().textColor();
+  m_brachyDataStatus->setStyleSheet(
+      QStringLiteral("QLabel { border: 1px solid %1; border-radius: 4px; padding: 4px; color: %2; }")
+          .arg(borderColor, textColor.name()));
+}
+
 void DicomViewer::setFourViewMode(bool enabled) {
   setViewMode(enabled ? ViewMode::Quad : ViewMode::Single);
   m_fourViewMode = enabled;
