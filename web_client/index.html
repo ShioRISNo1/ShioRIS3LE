@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>ShioRIS3 - Vision Pro Viewer [v8-BOTH-AXES-FLIP]</title>
+    <link rel="stylesheet" href="css/style.css?v=12">
+</head>
+<body>
+    <div id="header">
+        <h1>🥽 ShioRIS3 - Vision Pro 3D Viewer</h1>
+        <div id="header-right">
+            <div id="status">
+                <span id="connection-status">Connecting...</span>
+            </div>
+            <div id="diagnostics-inline">
+                <div class="diagnostics-line">
+                    <span class="label">Origin</span>
+                    <span id="build-version-endpoint">URLを確認中...</span>
+                </div>
+                <div class="diagnostics-line">
+                    <span class="label">Security</span>
+                    <span id="secure-context-status">---</span>
+                </div>
+                <div class="diagnostics-line">
+                    <span class="label">Version</span>
+                    <span id="build-version-text">Webビルド情報を取得中...</span>
+                </div>
+                <div class="diagnostics-line">
+                    <span class="label">Status</span>
+                    <span id="build-version-status">---</span>
+                </div>
+                <div class="diagnostics-line">
+                    <button id="cache-bypass-btn" disabled>キャッシュ無効化リロード</button>
+                    <span id="cache-bypass-note">Vision Proでバージョンが一致しない場合はキャッシュ削除リロードを実行してください。<strong>HTTPS未設定のままではVision Proで没入表示できません。</strong></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="controls">
+        <div class="control-section">
+            <h3>Patient Selection</h3>
+            <select id="patient-select">
+                <option value="">Loading patients...</option>
+            </select>
+            <button id="load-patient-btn">Load Patient</button>
+        </div>
+
+        <div class="control-section">
+            <h3>Display Options</h3>
+            <label>
+                <input type="checkbox" id="show-ct" checked> Show CT Volume
+            </label>
+            <label>
+                <input type="checkbox" id="show-structures"> Show Structures
+            </label>
+            <label>
+                <input type="checkbox" id="show-dose"> Show Dose
+            </label>
+        </div>
+
+        <div class="control-section" id="slice-controls" style="display: none;">
+            <h3>Slice Position</h3>
+            <div class="slider-container">
+                <label for="axial-slider">Axial: <span id="axial-value">50%</span></label>
+                <input type="range" id="axial-slider" min="0" max="100" value="50" step="1">
+            </div>
+            <div class="slider-container">
+                <label for="sagittal-slider">Sagittal: <span id="sagittal-value">50%</span></label>
+                <input type="range" id="sagittal-slider" min="0" max="100" value="50" step="1">
+            </div>
+            <div class="slider-container">
+                <label for="coronal-slider">Coronal: <span id="coronal-value">50%</span></label>
+                <input type="range" id="coronal-slider" min="0" max="100" value="50" step="1">
+            </div>
+        </div>
+
+        <div class="control-section">
+            <h3>VR Mode</h3>
+            <button id="vr-button" disabled>Enter VR Mode</button>
+            <button id="spatial-button" disabled>Enter Spatial Mode (Passthrough)</button>
+            <p class="info-text">Use Vision Pro to experience immersive 3D visualization</p>
+            <div id="xr-health">
+                <div class="xr-health-line">
+                    <span class="label">Secure</span>
+                    <span id="xr-secure-status" class="value">Checking...</span>
+                </div>
+                <div class="xr-health-line">
+                    <span class="label">Spatial API</span>
+                    <span id="xr-spatial-status" class="value">Checking...</span>
+                </div>
+                <div class="xr-health-line">
+                    <span class="label">Blend</span>
+                    <span id="xr-blend-status" class="value">---</span>
+                </div>
+                <p id="xr-warning" class="xr-warning">---</p>
+            </div>
+            <details style="margin-top: 10px;">
+                <summary style="cursor: pointer; font-size: 12px; opacity: 0.8;">Vision Pro Setup</summary>
+                <div style="font-size: 11px; opacity: 0.7; margin-top: 8px; line-height: 1.5;">
+                    <p><strong>If "VR Not Supported" appears:</strong></p>
+                    <ol style="margin-left: 20px; margin-top: 5px;">
+                        <li>Open Settings on Vision Pro</li>
+                        <li>Go to Safari → Advanced → Feature Flags</li>
+                        <li>Enable "WebXR Device API"</li>
+                        <li>Reload this page</li>
+                    </ol>
+                    <p style="margin-top: 8px;"><strong>Note:</strong> HTTPS required for IP addresses</p>
+                </div>
+            </details>
+        </div>
+
+        <div class="control-section">
+            <h3>About</h3>
+            <p class="info-text">
+                ShioRIS3 Vision Pro integration enables immersive 3D visualization
+                of radiation therapy treatment plans in spatial computing.
+            </p>
+        </div>
+
+    </div>
+
+    <div id="viewer-container">
+        <canvas id="viewer-canvas"></canvas>
+        <div id="loading">
+            <div class="loader"></div>
+            <p>Loading 3D viewer...</p>
+        </div>
+        <div id="info-overlay">
+            <div id="instructions">
+                <h3>Controls</h3>
+                <ul>
+                    <li><strong>Mouse drag</strong>: Rotate view</li>
+                    <li><strong>Mouse wheel</strong>: Zoom in/out</li>
+                    <li><strong>Right click drag</strong>: Pan view</li>
+                    <li><strong>Sliders</strong>: Adjust slice positions</li>
+                    <li><strong>VR Mode</strong>: Use left/right triggers to navigate slices</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- WebXR Polyfill for Safari 26.1 AR support -->
+    <script src="https://cdn.jsdelivr.net/npm/webxr-polyfill@latest/build/webxr-polyfill.js"></script>
+    <script>
+        // Initialize WebXR Polyfill to enable immersive-ar on Safari
+        var polyfill = new WebXRPolyfill();
+        console.log('WebXR Polyfill initialized');
+    </script>
+
+    <!-- Three.js library (CDN) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <!-- Application entry point (main.js imports all dependencies) -->
+    <script type="module" src="js/main.js?v=12"></script>
+</body>
+</html>

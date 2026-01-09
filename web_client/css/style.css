@@ -1,0 +1,442 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #ffffff;
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+#header {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 30px;
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+#header h1 {
+    font-size: 24px;
+    font-weight: 600;
+}
+
+#header-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 12px;
+    width: 100%;
+    position: relative;
+}
+
+#status {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    width: 100%;
+}
+
+#connection-status {
+    padding: 8px 16px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    font-size: 14px;
+}
+
+#connection-status.connected {
+    background: rgba(76, 217, 100, 0.3);
+}
+
+#connection-status.error {
+    background: rgba(255, 59, 48, 0.3);
+}
+
+#controls {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 20px;
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    gap: 30px;
+    overflow-x: auto;
+}
+
+.control-section {
+    min-width: 200px;
+}
+
+#diagnostics-inline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 10px 14px;
+    border-radius: 10px;
+    width: min(520px, 100%);
+    transition: border 0.2s ease, box-shadow 0.2s ease;
+}
+
+#diagnostics-inline[data-fallback="true"] {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    width: min(360px, calc(100% - 32px));
+    z-index: 9999;
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    backdrop-filter: blur(20px);
+}
+
+#diagnostics-inline[data-state="error"] {
+    border: 1px solid rgba(255, 149, 0, 0.6);
+    box-shadow: 0 0 25px rgba(255, 149, 0, 0.25);
+}
+
+#diagnostics-inline[data-state="ok"] {
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.diagnostics-line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    flex-wrap: wrap;
+}
+
+.diagnostics-line .label {
+    width: 60px;
+    opacity: 0.7;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 11px;
+}
+
+#build-version-text {
+    font-weight: 600;
+    font-size: 13px;
+}
+
+#build-version-status {
+    font-size: 12px;
+    opacity: 0.8;
+    min-height: 18px;
+}
+
+#build-version-endpoint,
+#secure-context-status {
+    font-size: 12px;
+    word-break: break-all;
+}
+
+#secure-context-status.secure {
+    color: #4cd964;
+    font-weight: 600;
+}
+
+#secure-context-status.insecure {
+    color: #ff3b30;
+    font-weight: 600;
+}
+
+#diagnostics-inline button {
+    padding: 6px 12px;
+    font-size: 12px;
+}
+
+#cache-bypass-note {
+    font-size: 11px;
+    opacity: 0.7;
+}
+
+#cache-bypass-note strong {
+    color: #ffd479;
+}
+
+.control-section h3 {
+    font-size: 16px;
+    margin-bottom: 10px;
+    opacity: 0.8;
+}
+
+.control-section label {
+    display: block;
+    margin: 8px 0;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.control-section input[type="checkbox"] {
+    margin-right: 8px;
+}
+
+.slider-container {
+    margin: 15px 0;
+}
+
+.slider-container label {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    font-size: 14px;
+}
+
+.control-section input[type="range"] {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+    outline: none;
+    -webkit-appearance: none;
+}
+
+.control-section input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    background: #667eea;
+    border: 2px solid #ffffff;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.control-section input[type="range"]::-webkit-slider-thumb:hover {
+    background: #764ba2;
+    transform: scale(1.2);
+}
+
+.control-section input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    background: #667eea;
+    border: 2px solid #ffffff;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.control-section input[type="range"]::-moz-range-thumb:hover {
+    background: #764ba2;
+    transform: scale(1.2);
+}
+
+#patient-select {
+    width: 100%;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    color: #ffffff;
+    font-size: 14px;
+    margin-bottom: 10px;
+}
+
+button {
+    padding: 10px 20px;
+    background: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 6px;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.3);
+    transform: translateY(-2px);
+}
+
+button:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+#vr-button,
+#spatial-button {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    width: 100%;
+    padding: 15px;
+    font-size: 16px;
+}
+
+#spatial-button {
+    margin-top: 8px;
+}
+
+#vr-button:not(:disabled),
+#spatial-button:not(:disabled) {
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+.info-text {
+    font-size: 12px;
+    opacity: 0.7;
+    margin-top: 8px;
+    line-height: 1.4;
+}
+
+#xr-health {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.xr-health-line {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    opacity: 0.85;
+}
+
+.xr-health-line .label {
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.xr-health-line .value {
+    font-weight: 600;
+}
+
+.xr-health-line .value.ok {
+    color: #4cd964;
+}
+
+.xr-health-line .value.warn {
+    color: #ffd479;
+}
+
+.xr-health-line .value.error {
+    color: #ff6b6b;
+}
+
+.xr-warning {
+    font-size: 11px;
+    line-height: 1.5;
+    margin-top: 2px;
+    color: #ffd479;
+}
+
+.xr-warning[data-severity="error"] {
+    color: #ff6b6b;
+    font-weight: 600;
+}
+
+.xr-warning[data-severity="warn"] {
+    color: #ffd479;
+}
+
+#viewer-container {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+}
+
+#viewer-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+#loading {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 40px;
+    border-radius: 12px;
+    backdrop-filter: blur(10px);
+}
+
+#loading.hidden {
+    display: none;
+}
+
+.loader {
+    border: 4px solid rgba(255, 255, 255, 0.3);
+    border-top: 4px solid #ffffff;
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 20px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+#info-overlay {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 20px;
+    border-radius: 12px;
+    backdrop-filter: blur(10px);
+    max-width: 300px;
+}
+
+#instructions h3 {
+    font-size: 16px;
+    margin-bottom: 10px;
+}
+
+#instructions ul {
+    list-style: none;
+    font-size: 14px;
+    line-height: 1.8;
+}
+
+#instructions li {
+    margin: 5px 0;
+}
+
+#instructions strong {
+    color: #667eea;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+    #controls {
+        flex-direction: column;
+    }
+
+    #info-overlay {
+        max-width: calc(100% - 40px);
+    }
+}

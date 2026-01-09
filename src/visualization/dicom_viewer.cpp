@@ -1,0 +1,17527 @@
+#include "visualization/dicom_viewer.h"
+#include "ai/lmstudio_client.h"
+#include "ai/whisper_client.h"
+#include "ai/audio_recorder.h"
+#include "web/web_server.h"
+#include "export/usdz_exporter.h"
+#include "visualization/collapsible_group_box.h"
+#include "visualization/dose_profile_window.h"
+#include "visualization/gamma_analysis_window.h"
+#include "visualization/opengl_3d_widget.h"
+#include "visualization/opengl_image_widget.h"
+#include "visualization/random_study_dialog.h"
+#include "dicom/structure_surface.h"
+#include "cyberknife/dose_calculator.h"
+#include "database/database_manager.h"
+#include <QApplication>
+#include <QAbstractItemView>
+#include <QCoreApplication>
+#include <QButtonGroup>
+#include <QCheckBox>
+#include <QColor>
+#include <QCursor>
+#include <QDebug>
+#include <QDateTime>
+#include <QDir>
+#include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFont>
+#include <QFontMetrics>
+#include <QFormLayout>
+#include <QFuture>
+#include <QFutureWatcher>
+#include <QGridLayout>
+#include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QJsonValue>
+#include <QDialogButtonBox>
+#include <QLocale>
+#include <QLineF>
+#include <QLayoutItem>
+#include <QMatrix4x4>
+#include <QMenu>
+#include <QSettings>
+#include <QMessageBox>
+#include <QPainter>
+#include <QPen>
+#include <QPair>
+#include <QSizePolicy>
+#include <QInputDialog>
+#include <QBrush>
+#include <QPalette>
+#include <QMetaObject>
+#include <QPixmap>
+#include <QPointer>
+#include <QProgressBar>
+#include <QProgressDialog>
+#include <QPushButton>
+#include <QScrollBar>
+#include <QSignalBlocker>
+#include <QSize>
+#include <QSizePolicy>
+#include <QSplitter>
+#include <QGroupBox>
+#include <QLineEdit>
+#include <QComboBox>
+
+#include "theme_manager.h"
+#include <QStackedWidget>
+#include <QStandardPaths>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QVariant>
+#include <QUrl>
+#include <QStringList>
+#include <QStringView>
+#include <QRegularExpression>
+#include <array>
+#include <cmath>
+#include <initializer_list>
+#include <QMap>
+#include <QTextCursor>
+#include <QThread>
+#include <QTimer>
+#include <QVector>
+#include <QVector3D>
+#include <QXmlStreamReader>
+#include <QtConcurrent>
+#include <QtGlobal>
+#include <utility>
+#include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <iterator>
+#include <numeric>
+#include <dcmtk/dcmdata/dctk.h>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/objdetect.hpp>
+#include <opencv2/videoio.hpp>
+#include <random>
+#if __has_include(<opencv2/wechat_qrcode.hpp>)
+#include <opencv2/wechat_qrcode.hpp>
+#define HAS_WECHAT_QR 1
+#else
+#define HAS_WECHAT_QR 0
+#endif
+#include "qrcodegen/qrcodegen.hpp"
+#include <set>
+#include <vector>
+#ifdef USE_ONNXRUNTIME
+#include <onnxruntime_cxx_api.h>
+#endif
+
+namespace {
+const QString kDefaultLmstudioEndpoint =
+    QStringLiteral("http://localhost:1234/v1/chat/completions");
+const QString kDefaultLmstudioModel =
+    QStringLiteral("mistralai/magistral-small-2509");
+constexpr int kDefaultSystemPromptVersion = 7;
+
+struct AiPromptSection {
+  QString heading;
+  QString body;
+};
+
+QString buildDefaultPromptTemplate() {
+  const QList<AiPromptSection> sections = {
+      {QStringLiteral("Your Role"),
+       QStringLiteral("You are an autonomous agent operating the ShioRIS3 medical image "
+                      "viewer. Interpret natural-language user requests and convert them "
+                      "into JSON commands.")},
+      {QStringLiteral("Core Principles"),
+       QStringLiteral("1. Safety first: confirm anything unclear.\n"
+                      "2. Explicit confirmation: never guess paths, ROI names, or numbers—ask with show_message.\n"
+                      "3. Stepwise execution: obtain approval before heavy operations such as run_segmentation or run_dpsd_analysis.\n"
+                      "4. Minimum required actions: combine only the commands needed to fulfill the request.\n"
+                      "5. Treat the ROI list as read-only unless the user supplies a new dataset.")},
+      {QStringLiteral("Response Format (MANDATORY)"),
+       QStringLiteral("Always output a valid JSON object only.\n"
+                      "Do not include code fences or Markdown.\n"
+                      "Follow this structure:\n"
+                      "{\n"
+                      "  \"commands\": [\n"
+                      "    {\n"
+                      "      \"action\": \"ActionName\",\n"
+                      "      \"params\": {\n"
+                      "        \"ParameterName\": \"Value\"\n"
+                      "      }\n"
+                      "    }\n"
+                      "  ]\n"
+                      "}")},
+      {QStringLiteral("Available Actions Overview"),
+       QStringLiteral("### 1. File Operations\n"
+                      "- open_dicom_file: { \"path\": \"absolute path\" }\n"
+                      "- open_dicom_directory: { \"path\": \"absolute path\" }\n\n"
+                      "### 2. View Layout Control\n"
+                      "- set_view_mode: { \"mode\": \"single|dual|quad|five\" }\n"
+                      "- set_view_content: { \"view\": zero-based index (optional), \"content\": \"axial|sagittal|coronal|dvh|3d|profile\" }\n\n"
+                      "### 3. Image Series Switching\n"
+                      "- set_image_series: { \"series\": \"image2\" } or { \"index\": 2 } or { \"modality\": \"MRI\" }\n"
+                      "  - Use when the user requests \"Image2に変更\" to display the MRI dataset.\n\n"
+                      "### 4. Zoom Controls\n"
+                      "- zoom_in / zoom_out / reset_zoom / fit_to_window (no parameters)\n\n"
+                      "### 5. Panning\n"
+                      "- pan: { \"direction\": \"up|down|left|right\", \"amount_percent\": number (optional), \"view\": index (optional), \"x_percent\": number (optional), \"y_percent\": number (optional) }\n"
+                      "  - If the amount is omitted, move 25% of the viewport size.\n\n"
+                      "### 6. Dose Analysis\n"
+                      "- calculate_dvh: { \"roi\": \"name\" or \"rois\": [\"name\"], \"metrics\": [\"D95\", \"Dmean\", ...] }\n"
+                      "- run_dpsd_analysis: { \"roi\": \"name\", \"sample_roi\": \"name\" (optional), \"start_mm\": number, \"end_mm\": number, \"mode\": \"2d|3d\" }\n\n"
+                      "### 7. AI Features\n"
+                      "- run_segmentation (no parameters). Confirm with show_message before execution.\n\n"
+                      "### 8. User Interaction\n"
+                      "- show_message: { \"message\": \"text for the user\" }")},
+      {QStringLiteral("Auto-Execution Policy"),
+       QStringLiteral("Only these actions are auto-executable without confirmation: set_view_mode, set_view_content, set_image_series, zoom_in, zoom_out, reset_zoom, fit_to_window, pan, advance_slice, rewind_slice, show_message.\n"
+                      "All other actions must request confirmation with show_message unless the user already provided explicit consent.")},
+      {QStringLiteral("When to Use show_message"),
+       QStringLiteral("- Paths or ROI names are unknown.\n"
+                      "- Confirmation is required before heavy tasks.\n"
+                      "- Reporting results or requesting additional details.")},
+      {QStringLiteral("Error-Prevention Checklist"),
+       QStringLiteral("- Is every path explicit?\n"
+                      "- Are ROI names clear?\n"
+                      "- Are parameter types correct (string/number/array)?\n"
+                      "- Did you obtain consent before heavy operations?\n"
+                      "- Is the JSON syntax valid (commas, braces, quotes)?")},
+      {QStringLiteral("Live Viewer Context"),
+       QStringLiteral("{{VIEWER_CONTEXT_JSON}}")},
+      {QStringLiteral("Runtime Feedback"),
+       QStringLiteral("{{PROMPT_FEEDBACK}}")}};
+
+  QStringList lines;
+  lines << QStringLiteral("ShioRIS3 Operation Agent - System Prompt v7");
+  for (const AiPromptSection &section : sections) {
+    lines << QString();
+    lines << QStringLiteral("## %1").arg(section.heading);
+    lines << section.body;
+  }
+  lines << QString();
+  lines << QStringLiteral("Always return JSON only and never include extra explanations.");
+  return lines.join(QChar('\n'));
+}
+
+const QHash<QString, QString> &promptFailureBaseMessages() {
+  static const QHash<QString, QString> kMessages = {
+      {QStringLiteral("json_parse"),
+       QObject::tr("LLM応答をJSONとして解析できませんでした。構文エラーを避けてください。")},
+      {QStringLiteral("missing_commands"),
+       QObject::tr("commands配列が欠落しています。必ずcommandsを含めてください。")},
+      {QStringLiteral("unknown_action"),
+       QObject::tr("未対応のアクションが含まれていました。利用可能なアクション一覧を参照してください。")}};
+  return kMessages;
+}
+
+const QSet<QString> &autoExecutableActions() {
+  static const QSet<QString> kActions = {
+      QStringLiteral("set_view_mode"),   QStringLiteral("set_view_content"),
+      QStringLiteral("set_image_series"), QStringLiteral("zoom_in"),
+      QStringLiteral("zoom_out"),        QStringLiteral("reset_zoom"),
+      QStringLiteral("fit_to_window"),   QStringLiteral("pan"),
+      QStringLiteral("advance_slice"),   QStringLiteral("rewind_slice"),
+      QStringLiteral("show_message")};
+  return kActions;
+}
+}
+
+class DicomViewer::ScopedRoiUiReadGuard {
+public:
+  ScopedRoiUiReadGuard(DicomViewer *viewer, bool enabled)
+      : m_viewer(viewer) {
+    if (m_viewer && enabled) {
+      m_snapshot = m_viewer->captureRoiUiSnapshot();
+      m_active = m_snapshot.hasStructureList;
+    }
+  }
+
+  ~ScopedRoiUiReadGuard() {
+    if (m_viewer && m_active)
+      m_viewer->restoreRoiUiSnapshot(m_snapshot);
+  }
+
+  void release() { m_active = false; }
+
+private:
+  DicomViewer *m_viewer{nullptr};
+  RoiUiSnapshot m_snapshot;
+  bool m_active{false};
+};
+
+class MultiRowTabWidget : public QWidget {
+public:
+  explicit MultiRowTabWidget(QWidget *parent = nullptr)
+      : QWidget(parent), m_buttonGroup(new QButtonGroup(this)),
+        m_stack(new QStackedWidget(this)), m_buttonLayout(new QGridLayout) {
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    m_buttonLayout->setContentsMargins(0, 0, 0, 0);
+    m_buttonLayout->setHorizontalSpacing(6);
+    m_buttonLayout->setVerticalSpacing(6);
+    layout->addLayout(m_buttonLayout);
+    layout->addWidget(m_stack);
+    m_buttonGroup->setExclusive(true);
+    connect(m_buttonGroup, &QButtonGroup::idToggled, this,
+            [this](int id, bool checked) {
+              if (!checked)
+                return;
+              m_stack->setCurrentIndex(id);
+              for (int i = 0; i < m_buttons.size(); ++i) {
+                if (i == id)
+                  continue;
+                QSignalBlocker blocker(m_buttons[i]);
+                m_buttons[i]->setChecked(false);
+              }
+            });
+  }
+
+  int addTab(QWidget *widget, const QString &label) {
+    if (!widget)
+      return -1;
+    const int index = m_stack->addWidget(widget);
+    auto *button = new QToolButton(this);
+    button->setText(label);
+    button->setCheckable(true);
+    button->setAutoRaise(true);
+    button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_buttonGroup->addButton(button, index);
+    m_buttons.append(button);
+    updateButtonLayout();
+    if (index == 0) {
+      QSignalBlocker blocker(m_buttonGroup);
+      button->setChecked(true);
+      m_stack->setCurrentIndex(0);
+    }
+    return index;
+  }
+
+  void setCurrentWidget(QWidget *widget) {
+    if (!widget)
+      return;
+    const int index = m_stack->indexOf(widget);
+    if (index < 0)
+      return;
+    m_stack->setCurrentIndex(index);
+    QSignalBlocker blocker(m_buttonGroup);
+    for (int i = 0; i < m_buttons.size(); ++i) {
+      QSignalBlocker buttonBlocker(m_buttons[i]);
+      m_buttons[i]->setChecked(i == index);
+    }
+  }
+
+  QWidget *widget(int index) const { return m_stack->widget(index); }
+
+  int count() const { return m_stack->count(); }
+
+private:
+  void updateButtonLayout() {
+    while (QLayoutItem *item = m_buttonLayout->takeAt(0)) {
+      delete item;
+    }
+
+    const int count = m_buttons.size();
+    if (count == 0)
+      return;
+
+    const int rows = count > 2 ? 2 : 1;
+    const int columns = rows == 0 ? 0 : (count + rows - 1) / rows;
+
+    for (int i = 0; i < count; ++i) {
+      QToolButton *button = m_buttons.at(i);
+      const int row = rows == 1 ? 0 : i / columns;
+      const int column = rows == 1 ? i : i % columns;
+      button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+      m_buttonLayout->addWidget(button, row, column);
+    }
+
+    if (columns > 0) {
+      for (int c = 0; c < columns; ++c)
+        m_buttonLayout->setColumnStretch(c, 1);
+    }
+    for (int r = 0; r <= rows; ++r)
+      m_buttonLayout->setRowStretch(r, 0);
+  }
+
+  QButtonGroup *m_buttonGroup{nullptr};
+  QStackedWidget *m_stack{nullptr};
+  QGridLayout *m_buttonLayout{nullptr};
+  QVector<QToolButton *> m_buttons;
+};
+
+namespace {
+constexpr double DEFAULT_ZOOM = 1.5;
+constexpr double DEFAULT_ZOOM_3D = 2.25;
+constexpr double ZOOM_3D_RATIO = DEFAULT_ZOOM_3D / DEFAULT_ZOOM;
+
+QRgb labelColor(int label) {
+  static const QVector<QRgb> colors = {
+      qRgba(255, 0, 0, 100),   qRgba(0, 255, 0, 100),
+      qRgba(0, 0, 255, 100),   qRgba(255, 255, 0, 100),
+      qRgba(255, 0, 255, 100), qRgba(0, 255, 255, 100)};
+  return colors[label % colors.size()];
+}
+} // namespace
+
+namespace {
+// Try multiple preprocessing variants to improve QR detection robustness
+static std::vector<std::string>
+decodeQrRobust(const cv::Mat &bgr,
+               std::vector<std::vector<cv::Point>> *outCorners = nullptr) {
+  auto appendCornersFromMat =
+      [](const cv::Mat &m, std::vector<std::vector<cv::Point>> *cornersOut) {
+        if (!cornersOut)
+          return;
+        try {
+          if (m.total() >= 4) {
+            std::vector<cv::Point> poly;
+            for (int i = 0; i < m.total(); ++i) {
+              cv::Point2f p = m.at<cv::Point2f>(i);
+              poly.emplace_back(cv::Point(static_cast<int>(std::lround(p.x)),
+                                          static_cast<int>(std::lround(p.y))));
+            }
+            cornersOut->push_back(std::move(poly));
+          }
+        } catch (...) {
+        }
+      };
+
+  auto runVariant = [&](const cv::Mat &img, std::vector<std::string> &acc,
+                        std::vector<std::vector<cv::Point>> *cornersOut) {
+    try {
+      cv::QRCodeDetector qrd;
+      // Slightly relax approximation if supported (OpenCV >= 4.5)
+      // try/catch to be safe across versions
+      try {
+        qrd.setEpsX(0.2);
+      } catch (...) {
+      }
+      try {
+        qrd.setEpsY(0.2);
+      } catch (...) {
+      }
+      // First try single-code path (often more robust than multi on clean
+      // codes)
+      try {
+        cv::Mat pts;
+        std::string single = qrd.detectAndDecode(img, pts);
+        if (!single.empty()) {
+          acc.push_back(single);
+          appendCornersFromMat(pts, cornersOut);
+        }
+      } catch (...) {
+      }
+      // Try detect + decode path
+      try {
+        std::vector<cv::Point> quad;
+        bool found = qrd.detect(img, quad);
+        if (found && quad.size() >= 4) {
+          std::string v = qrd.decode(img, quad);
+          if (!v.empty()) {
+            acc.push_back(v);
+            if (cornersOut)
+              cornersOut->push_back(quad);
+          }
+        }
+      } catch (...) {
+      }
+      std::vector<std::string> decoded;
+      std::vector<std::vector<cv::Point>> corners;
+      bool ok = qrd.detectAndDecodeMulti(img, decoded, corners);
+      if (ok && !decoded.empty()) {
+        acc.insert(acc.end(), decoded.begin(), decoded.end());
+        if (cornersOut)
+          cornersOut->insert(cornersOut->end(), corners.begin(), corners.end());
+      }
+    } catch (...) {
+      // ignore
+    }
+  };
+
+  std::vector<std::string> results;
+  std::vector<std::vector<cv::Point>> gatheredCorners;
+
+  // 1) Original
+  runVariant(bgr, results, &gatheredCorners);
+
+  // 2) Grayscale
+  cv::Mat gray;
+  try {
+    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+  } catch (...) {
+  }
+  if (!gray.empty()) {
+    runVariant(gray, results, &gatheredCorners);
+  }
+
+  // 3) CLAHE (contrast enhance) then try
+  if (!gray.empty()) {
+    try {
+      cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+      cv::Mat eq;
+      clahe->apply(gray, eq);
+      runVariant(eq, results, &gatheredCorners);
+    } catch (...) {
+    }
+  }
+
+  // 4) Adaptive thresholded binary
+  if (!gray.empty()) {
+    try {
+      cv::Mat bw;
+      cv::adaptiveThreshold(gray, bw, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+                            cv::THRESH_BINARY, 31, 2);
+      runVariant(bw, results, &gatheredCorners);
+    } catch (...) {
+    }
+  }
+
+  // 4b) Inverted variants
+  if (!gray.empty()) {
+    try {
+      cv::Mat invGray;
+      cv::bitwise_not(gray, invGray);
+      runVariant(invGray, results, &gatheredCorners);
+    } catch (...) {
+    }
+  }
+  if (!gray.empty()) {
+    try {
+      cv::Mat bw2;
+      cv::adaptiveThreshold(gray, bw2, 255, cv::ADAPTIVE_THRESH_MEAN_C,
+                            cv::THRESH_BINARY, 25, 5);
+      cv::Mat invBw;
+      cv::bitwise_not(bw2, invBw);
+      runVariant(invBw, results, &gatheredCorners);
+    } catch (...) {
+    }
+  }
+
+  // 4c) Morphological closing to connect modules
+  if (!gray.empty()) {
+    try {
+      cv::Mat bw;
+      cv::threshold(gray, bw, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+      cv::Mat closed;
+      cv::morphologyEx(
+          bw, closed, cv::MORPH_CLOSE,
+          cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)));
+      runVariant(closed, results, &gatheredCorners);
+    } catch (...) {
+    }
+  }
+
+  // 5) Upscale for small QR codes
+  cv::Mat big;
+  try {
+    double maxDim = std::max(bgr.cols, bgr.rows);
+    std::vector<double> scales;
+    if (maxDim < 1000)
+      scales = {1.5, 2.0, 3.0};
+    else
+      scales = {1.25, 1.5};
+    for (double s : scales) {
+      cv::resize(bgr, big, cv::Size(), s, s, cv::INTER_CUBIC);
+      runVariant(big, results, &gatheredCorners);
+    }
+  } catch (...) {
+  }
+
+  // 6) Rotations (in case camera orientation confuses detection)
+  auto tryRotate = [&](const cv::Mat &src) {
+    try {
+      cv::Mat rot;
+      cv::rotate(src, rot, cv::ROTATE_90_CLOCKWISE);
+      runVariant(rot, results, &gatheredCorners);
+      cv::rotate(src, rot, cv::ROTATE_180);
+      runVariant(rot, results, &gatheredCorners);
+      cv::rotate(src, rot, cv::ROTATE_90_COUNTERCLOCKWISE);
+      runVariant(rot, results, &gatheredCorners);
+    } catch (...) {
+    }
+  };
+  tryRotate(bgr);
+  if (!gray.empty())
+    tryRotate(gray);
+
+  // Deduplicate
+  std::set<std::string> uniq(results.begin(), results.end());
+  std::vector<std::string> out(uniq.begin(), uniq.end());
+  if (outCorners && !gatheredCorners.empty()) {
+    *outCorners = gatheredCorners;
+  }
+
+#if HAS_WECHAT_QR
+  // Fallback to WeChat QR if nothing found via native detector
+  if (out.empty()) {
+    auto findModelDir = []() -> QString {
+      QString env = QString::fromUtf8(qgetenv("WECHAT_QR_MODEL_DIR"));
+      if (!env.isEmpty())
+        return env;
+      QString appDir = QCoreApplication::applicationDirPath();
+      QStringList cands = {appDir + "/models/wechat_qrcode",
+                           QDir::currentPath() + "/models/wechat_qrcode"};
+      for (const QString &p : cands) {
+        if (QDir(p).exists())
+          return p;
+      }
+      return QString();
+    };
+
+    QString dir = findModelDir();
+    if (!dir.isEmpty()) {
+      QString dp = QDir(dir).filePath("detect.prototxt");
+      QString dm = QDir(dir).filePath("detect.caffemodel");
+      QString sp = QDir(dir).filePath("sr.prototxt");
+      QString sm = QDir(dir).filePath("sr.caffemodel");
+      if (QFileInfo::exists(dp) && QFileInfo::exists(dm) &&
+          QFileInfo::exists(sp) && QFileInfo::exists(sm)) {
+        try {
+          cv::wechat_qrcode::WeChatQRCode we(dp.toStdString(), dm.toStdString(),
+                                             sp.toStdString(),
+                                             sm.toStdString());
+          std::vector<cv::Mat> pts;
+          std::vector<std::string> res = we.detectAndDecode(bgr, pts);
+          if (!res.empty()) {
+            // Merge
+            for (const auto &s : res)
+              uniq.insert(s);
+            out.assign(uniq.begin(), uniq.end());
+            if (outCorners) {
+              for (const auto &m : pts) {
+                if (m.total() >= 4) {
+                  std::vector<cv::Point> poly;
+                  for (int i = 0; i < m.total(); ++i) {
+                    cv::Point2f p = m.at<cv::Point2f>(i);
+                    poly.emplace_back(
+                        cv::Point(static_cast<int>(std::lround(p.x)),
+                                  static_cast<int>(std::lround(p.y))));
+                  }
+                  outCorners->push_back(std::move(poly));
+                }
+              }
+            }
+          }
+        } catch (...) {
+          // ignore
+        }
+      }
+    }
+  }
+#endif
+  return out;
+}
+} // namespace
+
+namespace {
+// Fast path: grayscale + detectAndDecode (+ fallback detect/decode), optionally
+// on downscaled image
+static std::vector<std::string>
+decodeQrFast(const cv::Mat &bgr,
+             std::vector<std::vector<cv::Point>> *outCorners = nullptr) {
+  auto appendCornersFromMat =
+      [](const cv::Mat &m, std::vector<std::vector<cv::Point>> *cornersOut) {
+        if (!cornersOut)
+          return;
+        try {
+          if (m.total() >= 4) {
+            std::vector<cv::Point> poly;
+            for (int i = 0; i < m.total(); ++i) {
+              cv::Point2f p = m.at<cv::Point2f>(i);
+              poly.emplace_back(cv::Point(static_cast<int>(std::lround(p.x)),
+                                          static_cast<int>(std::lround(p.y))));
+            }
+            cornersOut->push_back(std::move(poly));
+          }
+        } catch (...) {
+        }
+      };
+  std::vector<std::string> acc;
+  try {
+    cv::Mat gray;
+    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+    // downscale moderately for speed
+    cv::Mat small;
+    double scale = 0.75;
+    cv::resize(gray, small, cv::Size(), scale, scale, cv::INTER_AREA);
+    cv::QRCodeDetector qrd;
+    // direct
+    cv::Mat pts;
+    std::string s = qrd.detectAndDecode(small, pts);
+    if (!s.empty()) {
+      acc.push_back(s);
+      // rescale corners back
+      if (outCorners && pts.total() >= 4) {
+        std::vector<cv::Point> poly;
+        for (int i = 0; i < pts.total(); ++i) {
+          cv::Point2f p = pts.at<cv::Point2f>(i);
+          poly.emplace_back(
+              cv::Point(static_cast<int>(std::lround(p.x / scale)),
+                        static_cast<int>(std::lround(p.y / scale))));
+        }
+        outCorners->push_back(std::move(poly));
+      }
+      return acc;
+    }
+    // detect + decode
+    std::vector<cv::Point> quad;
+    if (qrd.detect(small, quad) && quad.size() >= 4) {
+      std::string v = qrd.decode(small, quad);
+      if (!v.empty()) {
+        acc.push_back(v);
+        if (outCorners) {
+          std::vector<cv::Point> poly;
+          for (const auto &pt : quad) {
+            poly.emplace_back(
+                cv::Point(static_cast<int>(std::lround(pt.x / scale)),
+                          static_cast<int>(std::lround(pt.y / scale))));
+          }
+          outCorners->push_back(std::move(poly));
+        }
+      }
+    }
+  } catch (...) {
+  }
+  return acc;
+}
+} // namespace
+
+namespace {
+double parseCyberKnifeDouble(const QString &value, bool *okOut) {
+  bool ok = false;
+  QString trimmed = value.trimmed();
+  double d = trimmed.toDouble(&ok);
+  if (!ok) {
+    static const QRegularExpression numberPattern(
+        QStringLiteral("([+-]?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)"));
+    const QRegularExpressionMatch match = numberPattern.match(trimmed);
+    if (match.hasMatch()) {
+      d = match.captured(1).toDouble(&ok);
+    }
+  }
+  if (okOut)
+    *okOut = ok;
+  return ok ? d : 0.0;
+}
+
+struct CyberKnifeBeamData {
+  QHash<QString, QString> values;
+  QString nodePosX;
+  QString nodePosY;
+  QString nodePosZ;
+  QString targetPosX;
+  QString targetPosY;
+  QString targetPosZ;
+  QString upVectorX;
+  QString upVectorY;
+  QString upVectorZ;
+  QString referencePointX;
+  QString referencePointY;
+  QString referencePointZ;
+};
+
+QString trimmedText(const QString &value) {
+  QString t = value.trimmed();
+  return t;
+}
+
+QString formatCyberKnifeInt(const QString &value) {
+  const QString text = trimmedText(value);
+  if (text.isEmpty())
+    return QStringLiteral("-");
+  bool ok = false;
+  double number = text.toDouble(&ok);
+  if (ok) {
+    return QString::number(static_cast<long long>(std::trunc(number)));
+  }
+  return text;
+}
+
+QString formatCyberKnifeFloat(const QString &value, int decimals = 2) {
+  const QString text = trimmedText(value);
+  if (text.isEmpty())
+    return QStringLiteral("-");
+  bool ok = false;
+  double number = text.toDouble(&ok);
+  if (ok) {
+    return QString::number(number, 'f', decimals);
+  }
+  return text;
+}
+
+QString formatDicomCoordinate(double value) {
+  QString text = QString::number(value, 'f', 6);
+  const int dotIndex = text.indexOf(QLatin1Char('.'));
+  if (dotIndex != -1) {
+    while (text.endsWith(QLatin1Char('0')))
+      text.chop(1);
+    if (text.endsWith(QLatin1Char('.')))
+      text.chop(1);
+  }
+  return text;
+}
+
+void convertIecPatientToDicom(QString &x, QString &y, QString &z) {
+  bool okX = false;
+  const double iecX = parseCyberKnifeDouble(x, &okX);
+  bool okY = false;
+  const double iecY = parseCyberKnifeDouble(y, &okY);
+  bool okZ = false;
+  const double iecZ = parseCyberKnifeDouble(z, &okZ);
+  if (!okX || !okY || !okZ)
+    return;
+
+  const double dicomX = iecX;
+  const double dicomY = -iecZ;
+  const double dicomZ = -iecY;
+
+  x = formatDicomCoordinate(dicomX);
+  y = formatDicomCoordinate(dicomY);
+  z = formatDicomCoordinate(dicomZ);
+}
+
+bool parseVectorElement(QXmlStreamReader &xml, QString &x, QString &y,
+                        QString &z) {
+  while (xml.readNextStartElement()) {
+    const QStringView name = xml.name();
+    const QString text = xml.readElementText(QXmlStreamReader::IncludeChildElements)
+                             .trimmed();
+    if (name == QLatin1String("X")) {
+      x = text;
+    } else if (name == QLatin1String("Y")) {
+      y = text;
+    } else if (name == QLatin1String("Z")) {
+      z = text;
+    } else {
+      xml.skipCurrentElement();
+    }
+  }
+  return !xml.hasError();
+}
+
+bool parseBeamElement(QXmlStreamReader &xml, CyberKnifeBeamData &beam) {
+  while (xml.readNextStartElement()) {
+    const QStringView name = xml.name();
+    if (name == QLatin1String("NODE_POSITION")) {
+      if (!parseVectorElement(xml, beam.nodePosX, beam.nodePosY,
+                              beam.nodePosZ))
+        return false;
+    } else if (name == QLatin1String("TARGET_POSITION")) {
+      if (!parseVectorElement(xml, beam.targetPosX, beam.targetPosY,
+                              beam.targetPosZ))
+        return false;
+    } else if (name == QLatin1String("UP_VECTOR")) {
+      if (!parseVectorElement(xml, beam.upVectorX, beam.upVectorY,
+                              beam.upVectorZ))
+        return false;
+    } else if (name.compare(u"REFERENCE_POINT", Qt::CaseInsensitive) == 0 ||
+               name.compare(u"REF_POINT", Qt::CaseInsensitive) == 0 ||
+               name.compare(u"REFERENCE_POINT_POSITION", Qt::CaseInsensitive) == 0 ||
+               name.compare(u"REF_POINT_POSITION", Qt::CaseInsensitive) == 0) {
+      const auto attributes = xml.attributes();
+      const QString coordSystem =
+          attributes.value(QLatin1String("coord")).toString().trimmed();
+      if (!parseVectorElement(xml, beam.referencePointX, beam.referencePointY,
+                              beam.referencePointZ))
+        return false;
+      if (coordSystem.compare(QLatin1String("IEC patient frame"),
+                              Qt::CaseInsensitive) == 0) {
+        convertIecPatientToDicom(beam.referencePointX, beam.referencePointY,
+                                 beam.referencePointZ);
+      }
+    } else {
+      const QString text =
+          xml.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
+      beam.values.insert(name.toString(), text);
+    }
+  }
+  return !xml.hasError();
+}
+
+struct CyberKnifeDensityModelData {
+  QString name;
+  QString type;
+  QString typeValue;
+  QString version;
+  QStringList warnings;
+  QVector<QPair<double, double>> entries;
+};
+
+bool parseDensityPointElement(QXmlStreamReader &xml, double *ctValue,
+                              double *densityValue) {
+  double ct = 0.0;
+  bool hasCt = false;
+  double electronDensity = 0.0;
+  bool electronOk = false;
+  double massDensity = 0.0;
+  bool massOk = false;
+
+  while (xml.readNextStartElement()) {
+    const QStringView name = xml.name();
+    const QString text = xml.readElementText(QXmlStreamReader::IncludeChildElements)
+                             .trimmed();
+    if (name.compare(u"CT", Qt::CaseInsensitive) == 0) {
+      bool ok = false;
+      const double value = parseCyberKnifeDouble(text, &ok);
+      if (ok) {
+        ct = value;
+        hasCt = true;
+      }
+    } else if (name.compare(u"ELECTRON_DENSITY", Qt::CaseInsensitive) == 0) {
+      bool ok = false;
+      const double value = parseCyberKnifeDouble(text, &ok);
+      if (ok) {
+        electronDensity = value;
+        electronOk = true;
+      }
+    } else if (name.compare(u"MASS_DENSITY", Qt::CaseInsensitive) == 0) {
+      bool ok = false;
+      const double value = parseCyberKnifeDouble(text, &ok);
+      if (ok) {
+        massDensity = value;
+        massOk = true;
+      }
+    } else {
+      xml.skipCurrentElement();
+    }
+  }
+
+  if (xml.hasError())
+    return false;
+
+  if (!hasCt)
+    return true;
+
+  double selectedDensity = std::numeric_limits<double>::quiet_NaN();
+  if (massOk && std::isfinite(massDensity) && massDensity >= 0.0) {
+    selectedDensity = massDensity;
+  } else if (electronOk && std::isfinite(electronDensity) &&
+             electronDensity >= 0.0) {
+    selectedDensity = electronDensity;
+  }
+
+  if (std::isfinite(selectedDensity)) {
+    if (ctValue)
+      *ctValue = ct;
+    if (densityValue)
+      *densityValue = selectedDensity;
+  }
+
+  return true;
+}
+
+bool parseDensityTableElement(QXmlStreamReader &xml,
+                              QVector<QPair<double, double>> &entries) {
+  while (xml.readNextStartElement()) {
+    const QStringView name = xml.name();
+    if (name.compare(u"DENSITY_POINT", Qt::CaseInsensitive) == 0) {
+      double ct = 0.0;
+      double density = std::numeric_limits<double>::quiet_NaN();
+      if (!parseDensityPointElement(xml, &ct, &density))
+        return false;
+      if (std::isfinite(ct) && std::isfinite(density))
+        entries.append({ct, density});
+    } else {
+      xml.skipCurrentElement();
+    }
+  }
+  return !xml.hasError();
+}
+
+bool parseDensityModelElement(QXmlStreamReader &xml,
+                              CyberKnifeDensityModelData &model) {
+  const auto attrs = xml.attributes();
+  if (attrs.hasAttribute(QStringLiteral("version")))
+    model.version = attrs.value(QStringLiteral("version")).toString().trimmed();
+
+  while (xml.readNextStartElement()) {
+    const QStringView name = xml.name();
+    if (name.compare(u"NAME", Qt::CaseInsensitive) == 0) {
+      model.name = xml.readElementText(QXmlStreamReader::IncludeChildElements)
+                        .trimmed();
+    } else if (name.compare(u"TYPE", Qt::CaseInsensitive) == 0) {
+      const auto typeAttrs = xml.attributes();
+      if (typeAttrs.hasAttribute(QStringLiteral("value")))
+        model.typeValue =
+            typeAttrs.value(QStringLiteral("value")).toString().trimmed();
+      model.type = xml.readElementText(QXmlStreamReader::IncludeChildElements)
+                        .trimmed();
+    } else if (name.compare(u"WARNING1", Qt::CaseInsensitive) == 0 ||
+               name.compare(u"WARNING2", Qt::CaseInsensitive) == 0) {
+      const QString warning =
+          xml.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
+      if (!warning.isEmpty())
+        model.warnings.append(warning);
+    } else if (name.compare(u"DENSITY_TABLE", Qt::CaseInsensitive) == 0) {
+      QVector<QPair<double, double>> tableEntries;
+      if (!parseDensityTableElement(xml, tableEntries))
+        return false;
+      model.entries += tableEntries;
+    } else {
+      xml.skipCurrentElement();
+    }
+  }
+
+  return !xml.hasError();
+}
+} // namespace
+
+namespace {
+double sampleVolumeTrilinear(const cv::Mat &volume, double x, double y,
+                             double z) {
+  if (volume.empty() || volume.dims != 3)
+    return 0.0;
+
+  const int depth = volume.size[0];
+  const int height = volume.size[1];
+  const int width = volume.size[2];
+
+  if (depth <= 0 || height <= 0 || width <= 0)
+    return 0.0;
+
+  x = std::clamp(x, 0.0, static_cast<double>(width - 1));
+  y = std::clamp(y, 0.0, static_cast<double>(height - 1));
+  z = std::clamp(z, 0.0, static_cast<double>(depth - 1));
+
+  const int x0 = static_cast<int>(std::floor(x));
+  const int y0 = static_cast<int>(std::floor(y));
+  const int z0 = static_cast<int>(std::floor(z));
+  const int x1 = std::min(x0 + 1, width - 1);
+  const int y1 = std::min(y0 + 1, height - 1);
+  const int z1 = std::min(z0 + 1, depth - 1);
+
+  const double fx = x - x0;
+  const double fy = y - y0;
+  const double fz = z - z0;
+
+  auto fetch = [&](int zi, int yi, int xi) -> double {
+    zi = std::clamp(zi, 0, depth - 1);
+    yi = std::clamp(yi, 0, height - 1);
+    xi = std::clamp(xi, 0, width - 1);
+    switch (volume.type()) {
+    case CV_16SC1: {
+      const short *plane = volume.ptr<short>(zi);
+      return static_cast<double>(plane[yi * width + xi]);
+    }
+    case CV_32FC1: {
+      const float *plane = volume.ptr<float>(zi);
+      return static_cast<double>(plane[yi * width + xi]);
+    }
+    case CV_8UC1: {
+      const uchar *plane = volume.ptr<uchar>(zi);
+      return static_cast<double>(plane[yi * width + xi]);
+    }
+    default:
+      return 0.0;
+    }
+  };
+
+  const double c000 = fetch(z0, y0, x0);
+  const double c100 = fetch(z0, y0, x1);
+  const double c010 = fetch(z0, y1, x0);
+  const double c110 = fetch(z0, y1, x1);
+  const double c001 = fetch(z1, y0, x0);
+  const double c101 = fetch(z1, y0, x1);
+  const double c011 = fetch(z1, y1, x0);
+  const double c111 = fetch(z1, y1, x1);
+
+  const double c00 = c000 * (1.0 - fx) + c100 * fx;
+  const double c10 = c010 * (1.0 - fx) + c110 * fx;
+  const double c01 = c001 * (1.0 - fx) + c101 * fx;
+  const double c11 = c011 * (1.0 - fx) + c111 * fx;
+  const double c0 = c00 * (1.0 - fy) + c10 * fy;
+  const double c1 = c01 * (1.0 - fy) + c11 * fy;
+  return c0 * (1.0 - fz) + c1 * fz;
+}
+
+cv::Mat resampleVolumeToReference(
+    const DicomVolume &reference, const DicomVolume &source,
+    const std::function<void(int, int)> &progressCallback = {}) {
+  if (reference.width() <= 0 || reference.height() <= 0 ||
+      reference.depth() <= 0)
+    return cv::Mat();
+
+  const cv::Mat &srcData = source.data();
+  if (srcData.empty() || srcData.dims != 3)
+    return cv::Mat();
+
+  const int depth = reference.depth();
+  const int height = reference.height();
+  const int width = reference.width();
+
+  int sizes[3] = {depth, height, width};
+  cv::Mat result(3, sizes, CV_16SC1);
+
+  std::atomic<int> completed{0};
+  if (progressCallback)
+    progressCallback(0, depth);
+
+  auto processSlice = [&](int z) {
+    short *dstPlane = result.ptr<short>(z);
+    for (int y = 0; y < height; ++y) {
+      short *dstRow = dstPlane + y * width;
+      for (int x = 0; x < width; ++x) {
+        QVector3D patient = reference.voxelToPatient(x, y, z);
+        QVector3D srcVoxel = source.patientToVoxelContinuous(patient);
+        const double sampled =
+            sampleVolumeTrilinear(srcData, srcVoxel.x(), srcVoxel.y(),
+                                  srcVoxel.z());
+        dstRow[x] = static_cast<short>(std::lround(sampled));
+      }
+    }
+    if (progressCallback) {
+      int done = ++completed;
+      progressCallback(done, depth);
+    }
+  };
+
+#if QT_CONFIG(concurrent)
+  if (depth > 1) {
+    QVector<int> zIndices(depth);
+    std::iota(zIndices.begin(), zIndices.end(), 0);
+    QFuture<void> future = QtConcurrent::map(zIndices, [&](int &zIndex) {
+      processSlice(zIndex);
+    });
+    while (!future.isFinished()) {
+      if (progressCallback)
+        QCoreApplication::processEvents();
+      QThread::yieldCurrentThread();
+    }
+  } else {
+    processSlice(0);
+  }
+#else
+  for (int z = 0; z < depth; ++z) {
+    processSlice(z);
+    if (progressCallback)
+      QCoreApplication::processEvents();
+  }
+#endif
+
+  return result;
+}
+} // namespace
+
+DoseColorBar::DoseColorBar(QWidget *parent) : QWidget(parent) {
+  setFixedWidth(80); // カラーバーの幅を固定
+  // 多数のビュー表示でも収まるよう最小高さを縮小
+  setMinimumHeight(50);
+  setAttribute(Qt::WA_OpaquePaintEvent, false);
+  setStyleSheet("background: transparent;");
+}
+
+void DoseColorBar::setDoseRange(double minDose, double maxDose) {
+  if (m_minDose != minDose || m_maxDose != maxDose) {
+    m_minDose = minDose;
+    m_maxDose = maxDose;
+    update();
+  }
+}
+
+void DoseColorBar::setDisplayMode(DoseResampledVolume::DoseDisplayMode mode) {
+  if (m_displayMode != mode) {
+    m_displayMode = mode;
+    update();
+  }
+}
+
+void DoseColorBar::setReferenceDose(double referenceDose) {
+  if (m_referenceDose != referenceDose) {
+    m_referenceDose = referenceDose;
+    update();
+  }
+}
+
+void DoseColorBar::setVisible(bool visible) {
+  if (m_isVisible != visible) {
+    m_isVisible = visible;
+    QWidget::setVisible(visible);
+    update();
+  }
+}
+
+int DoseColorBar::preferredWidth() const { return sizeHint().width(); }
+
+QSize DoseColorBar::sizeHint() const { return QSize(80, 200); }
+
+// カラーマッピング関数（dose_resampled_volume.cppと同じロジック）
+QRgb DoseColorBar::mapDoseToColor(float doseRatio) const {
+  // マイナス線量の場合は寒色系（紫～青）で表示
+  if (doseRatio < 0.0f) {
+    float negRatio = std::max(-1.0f, doseRatio);
+    float absRatio = std::abs(negRatio);
+
+    float hue = 270.0f - absRatio * 30.0f;
+    float saturation = 0.7f + absRatio * 0.3f;
+    float value = 0.5f + absRatio * 0.5f;
+
+    QColor color = QColor::fromHsvF(hue / 360.0f, saturation, value);
+    return qRgba(color.red(), color.green(), color.blue(), 255);
+  }
+
+  if (doseRatio == 0.0f) {
+    return qRgba(0, 0, 0, 0);
+  }
+
+  float hue = 0.0f;
+  float saturation = 1.0f;
+  float value = 1.0f;
+
+  if (doseRatio <= 0.2f) {
+    hue = 240.0f - (doseRatio / 0.2f) * 60.0f;
+    saturation = 0.8f + (doseRatio / 0.2f) * 0.2f;
+  } else if (doseRatio <= 0.4f) {
+    float t = (doseRatio - 0.2f) / 0.2f;
+    hue = 180.0f - t * 60.0f;
+    saturation = 1.0f;
+  } else if (doseRatio <= 0.6f) {
+    float t = (doseRatio - 0.4f) / 0.2f;
+    hue = 120.0f - t * 60.0f;
+    saturation = 1.0f;
+  } else if (doseRatio <= 0.8f) {
+    float t = (doseRatio - 0.6f) / 0.2f;
+    hue = 60.0f - t * 30.0f;
+    saturation = 1.0f;
+    value = 1.0f;
+  } else if (doseRatio <= 1.0f) {
+    float t = (doseRatio - 0.8f) / 0.2f;
+    hue = 30.0f - t * 30.0f;
+    saturation = 1.0f;
+    value = 1.0f;
+  } else {
+    float t = std::min(1.0f, (doseRatio - 1.0f) / 0.5f);
+    hue = 360.0f - t * 60.0f;
+    saturation = 1.0f;
+    value = 1.0f - t * 0.2f;
+  }
+
+  QColor color = QColor::fromHsvF(hue / 360.0f, saturation, value);
+  return qRgba(color.red(), color.green(), color.blue(), 255);
+}
+
+QRgb DoseColorBar::mapDoseToIsodose(float doseRatio) const {
+  // マイナス線量の場合は暗い青で表示
+  if (doseRatio < 0.0f) {
+    float absRatio = std::min(1.0f, std::abs(doseRatio));
+    int blue = static_cast<int>(100 + absRatio * 155);
+    return qRgba(50, 50, blue, 255);
+  }
+
+  if (doseRatio == 0.0f) {
+    return qRgba(0, 0, 0, 0);
+  }
+
+  static const float isodoseLevels[] = {0.95f, 0.90f, 0.80f, 0.70f,
+                                        0.50f, 0.30f, 0.10f};
+
+  static const QRgb isodoseColors[] = {
+      qRgba(255, 0, 0, 255),   // 赤
+      qRgba(255, 128, 0, 255), // オレンジ
+      qRgba(255, 255, 0, 255), // 黄
+      qRgba(0, 255, 0, 255),   // 緑
+      qRgba(0, 255, 255, 255), // シアン
+      qRgba(0, 0, 255, 255),   // 青
+      qRgba(128, 0, 255, 255)  // 紫
+  };
+
+  for (int i = 0; i < 7; ++i) {
+    if (doseRatio >= isodoseLevels[i]) {
+      return isodoseColors[i];
+    }
+  }
+
+  return qRgba(0, 0, 0, 0);
+}
+
+QRgb DoseColorBar::mapDoseToHot(float doseRatio) const {
+  // マイナス線量の場合は暗い青から黒へ
+  if (doseRatio < 0.0f) {
+    float absRatio = std::min(1.0f, std::abs(doseRatio));
+    int blue = static_cast<int>(absRatio * 200);
+    return qRgba(0, 0, blue, 255);
+  }
+
+  doseRatio = std::clamp(doseRatio, 0.0f, 1.0f);
+  float r = std::min(1.0f, doseRatio * 3.0f);
+  float g = std::clamp((doseRatio - 0.33f) * 3.0f, 0.0f, 1.0f);
+  float b = std::clamp((doseRatio - 0.66f) * 3.0f, 0.0f, 1.0f);
+  return qRgba(static_cast<int>(r * 255), static_cast<int>(g * 255),
+               static_cast<int>(b * 255), 255);
+}
+
+void DoseColorBar::paintEvent(QPaintEvent *event) {
+  // マイナス値も許容するため、minDose < maxDoseの条件のみチェック
+  if (!m_isVisible || m_minDose >= m_maxDose) {
+    return;
+  }
+
+  QPainter painter(this);
+  painter.setRenderHint(QPainter::Antialiasing);
+
+  // 描画領域の設定
+  QRect colorBarRect =
+      rect().adjusted(10, 20, -35, -20); // テキスト用のマージンを確保
+
+  // 背景を半透明の黒で描画
+  painter.fillRect(rect(), QColor(0, 0, 0, 120));
+
+  // フォント設定
+  QFont font = painter.font();
+  font.setPointSize(8);
+  painter.setFont(font);
+  const QColor textColor = ThemeManager::instance().textColor();
+  painter.setPen(textColor);
+
+  // タイトル描画
+  painter.drawText(rect().adjusted(2, 2, -2, 0),
+                   Qt::AlignTop | Qt::AlignHCenter, QString("Dose (Gy)"));
+
+  if (m_displayMode == DoseResampledVolume::DoseDisplayMode::Colorful) {
+    // カラフルモード：グラデーションバーを描画
+    int barHeight = colorBarRect.height();
+    int barWidth = 20;
+
+    for (int y = 0; y < barHeight; ++y) {
+      // 各ピクセル位置の実際の線量値を計算（上が最大値）
+      float pixelRatio = 1.0f - (float)y / barHeight;
+      double dose = m_minDose + pixelRatio * (m_maxDose - m_minDose);
+
+      // 線量値を正規化してカラーマッピング用のratioを計算
+      float ratio = 0.0f;
+      if (dose < 0.0) {
+        // マイナス線量の場合はminDoseを基準に正規化
+        ratio = static_cast<float>(dose / std::abs(m_minDose));
+      } else {
+        // 正の線量の場合は0～maxDoseの範囲で正規化
+        ratio = static_cast<float>((dose - std::max(0.0, m_minDose)) /
+                                    (m_maxDose - std::max(0.0, m_minDose)));
+      }
+
+      QRgb color = mapDoseToColor(ratio);
+
+      painter.setPen(QPen(QColor(color), 1));
+      painter.drawLine(colorBarRect.left(), colorBarRect.top() + y,
+                       colorBarRect.left() + barWidth, colorBarRect.top() + y);
+    }
+
+    // 線量値のラベルを描画
+    QFontMetrics fm(font);
+    int numLabels = 6;
+    for (int i = 0; i <= numLabels; ++i) {
+      float ratio = (float)i / numLabels;
+      double dose = m_minDose + ratio * (m_maxDose - m_minDose);
+      int y = colorBarRect.bottom() - (int)(ratio * barHeight);
+
+      // ラベルテキスト（小数点以下4桁まで表示）
+      QString label = QString::number(dose, 'f', 4);
+      int textX = colorBarRect.left() + barWidth + 5;
+
+      painter.setPen(textColor);
+      painter.drawText(textX, y + fm.height() / 4, label);
+
+      // 目盛り線
+      painter.setPen(Qt::lightGray);
+      painter.drawLine(colorBarRect.left() + barWidth, y,
+                       colorBarRect.left() + barWidth + 3, y);
+    }
+
+  } else if (m_displayMode == DoseResampledVolume::DoseDisplayMode::Isodose) {
+    // 等線量モード：レベル別の色を描画
+    static const float isodoseLevels[] = {0.95f, 0.90f, 0.80f, 0.70f,
+                                          0.50f, 0.30f, 0.10f};
+
+    static const QString isodoseLabels[] = {"95%", "90%", "80%", "70%",
+                                            "50%", "30%", "10%"};
+
+    int numLevels = 7;
+    int levelHeight = colorBarRect.height() / numLevels;
+    int barWidth = 20;
+
+    for (int i = 0; i < numLevels; ++i) {
+      float ratio = isodoseLevels[i];
+      QRgb color = mapDoseToIsodose(ratio);
+
+      QRect levelRect(colorBarRect.left(), colorBarRect.top() + i * levelHeight,
+                      barWidth, levelHeight);
+
+      painter.fillRect(levelRect, QColor(color));
+
+      // 境界線
+      painter.setPen(textColor);
+      painter.drawRect(levelRect);
+
+      // ラベル
+      double dose = ratio * m_referenceDose;
+      QString label = QString("%1\n(%2Gy)")
+                          .arg(isodoseLabels[i])
+                          .arg(QString::number(dose, 'f', 1));
+
+      int textX = colorBarRect.left() + barWidth + 5;
+      int textY = levelRect.center().y();
+
+      painter.setPen(textColor);
+      painter.drawText(textX, textY - 5, label);
+    }
+  } else if (m_displayMode ==
+             DoseResampledVolume::DoseDisplayMode::IsodoseLines) {
+    static const float isodoseLevels[] = {0.95f, 0.90f, 0.80f, 0.70f,
+                                          0.50f, 0.30f, 0.10f};
+    static const QString isodoseLabels[] = {"95%", "90%", "80%", "70%",
+                                            "50%", "30%", "10%"};
+
+    int numLevels = 7;
+    int levelHeight = colorBarRect.height() / numLevels;
+    int barWidth = 20;
+
+    painter.setBrush(Qt::NoBrush);
+
+    for (int i = 0; i < numLevels; ++i) {
+      float ratio = isodoseLevels[i];
+      QRgb color = mapDoseToIsodose(ratio);
+
+      int yCenter = colorBarRect.top() + i * levelHeight + levelHeight / 2;
+
+      QPen pen{QColor::fromRgb(color)};
+      pen.setWidth(2);
+      painter.setPen(pen);
+      painter.drawLine(colorBarRect.left(), yCenter,
+                       colorBarRect.left() + barWidth, yCenter);
+
+      QString label =
+          QString("%1\n(%2Gy)")
+              .arg(isodoseLabels[i])
+              .arg(QString::number(ratio * m_referenceDose, 'f', 1));
+
+      QRect textRect(colorBarRect.left() + barWidth + 5,
+                     colorBarRect.top() + i * levelHeight,
+                     colorBarRect.width() - barWidth - 5, levelHeight);
+
+      painter.setPen(textColor);
+      painter.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, label);
+    }
+  } else if (m_displayMode == DoseResampledVolume::DoseDisplayMode::Hot) {
+    // Hotモード：黒→赤→黄→白のグラデーション
+    int barHeight = colorBarRect.height();
+    int barWidth = 20;
+    for (int y = 0; y < barHeight; ++y) {
+      float ratio = 1.0f - (float)y / barHeight;
+      QRgb color = mapDoseToHot(ratio);
+      painter.setPen(QPen(QColor(color), 1));
+      painter.drawLine(colorBarRect.left(), colorBarRect.top() + y,
+                       colorBarRect.left() + barWidth, colorBarRect.top() + y);
+    }
+    QFontMetrics fm(font);
+    int numLabels = 6;
+    for (int i = 0; i <= numLabels; ++i) {
+      float ratio = (float)i / numLabels;
+      double dose = m_minDose + ratio * (m_maxDose - m_minDose);
+      int y = colorBarRect.bottom() - (int)(ratio * barHeight);
+      QString label = QString::number(dose, 'f', 1);
+      int textX = colorBarRect.left() + barWidth + 5;
+      painter.setPen(textColor);
+      painter.drawText(textX, y + fm.height() / 4, label);
+      painter.setPen(Qt::lightGray);
+      painter.drawLine(colorBarRect.left() + barWidth, y,
+                       colorBarRect.left() + barWidth + 3, y);
+    }
+  }
+
+  // 外枠を描画
+  painter.setPen(QPen(textColor, 1));
+  painter.drawRect(colorBarRect.adjusted(0, 0, 20, 0));
+}
+
+// RT Dose項目用ウィジェット
+class DoseItemWidget : public CollapsibleGroupBox {
+  Q_OBJECT
+public:
+  explicit DoseItemWidget(const QString &filename, double maxDose,
+                          QWidget *parent = nullptr)
+      : CollapsibleGroupBox(filename, parent), m_filename(filename), m_isSaved(false) {
+    m_check = new QCheckBox();
+    m_check->setChecked(true);
+    addHeaderWidget(m_check, true);
+
+    // Add Save button
+    m_saveButton = new QPushButton(tr("Save"));
+    m_saveButton->setMaximumWidth(60);
+    m_saveButton->setToolTip(tr("Save dose distribution to DICOM RT-Dose file"));
+    connect(m_saveButton, &QPushButton::clicked, this, &DoseItemWidget::saveRequested);
+    addHeaderWidget(m_saveButton, false);
+
+    auto *main = new QVBoxLayout();
+    main->setSizeConstraint(QLayout::SetMinAndMaxSize);
+
+    ThemeManager &theme = ThemeManager::instance();
+    QObject::connect(&theme, &ThemeManager::textColorChanged, this,
+                     [this](const QColor &color) {
+                       bool isDefault = qFuzzyIsNull(m_dataFr->value() - 1.0) &&
+                                        qFuzzyIsNull(m_displayFr->value() - 1.0) &&
+                                        qFuzzyIsNull(m_factor->value() - 1.0) &&
+                                        qFuzzyIsNull(m_shiftX->value()) &&
+                                        qFuzzyIsNull(m_shiftY->value()) &&
+                                        qFuzzyIsNull(m_shiftZ->value());
+                       if (isDefault)
+                         setTitleColor(color);
+                     });
+
+    m_maxLabel = new QLabel(QString("MaxDose: %1 Gy").arg(maxDose, 0, 'f', 2));
+    theme.applyTextColor(m_maxLabel);
+    main->addWidget(m_maxLabel);
+
+    QGroupBox *box = new QGroupBox(tr("Settings"));
+    theme.applyTextColor(box, QStringLiteral(
+                                 "QGroupBox { color: %1; } QGroupBox::title { "
+                                 "color: %1; }"));
+    box->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    QFormLayout *form = new QFormLayout(box);
+    form->setLabelAlignment(Qt::AlignLeft);
+    m_dataFr = new QDoubleSpinBox();
+    m_dataFr->setDecimals(1);
+    m_dataFr->setRange(0.1, 1000.0);
+    m_dataFr->setValue(1.0);
+    m_dataFr->setSingleStep(1);
+    m_dataFr->setMaximumWidth(90);
+    form->addRow(tr("Data Fr"), m_dataFr);
+    m_displayFr = new QDoubleSpinBox();
+    m_displayFr->setDecimals(1);
+    m_displayFr->setRange(0.1, 1000.0);
+    m_displayFr->setValue(1.0);
+    m_displayFr->setSingleStep(1);
+    m_displayFr->setMaximumWidth(90);
+    form->addRow(tr("Display Fr"), m_displayFr);
+    m_factor = new QDoubleSpinBox();
+    m_factor->setDecimals(4);
+    m_factor->setRange(-1000.0, 1000.0);
+    m_factor->setValue(1.0);
+    m_factor->setSingleStep(0.1);
+    m_factor->setMaximumWidth(90);
+    form->addRow(tr("Factor"), m_factor);
+    main->addWidget(box);
+
+    // Collapsible Shift section
+    auto *shiftBox = new CollapsibleGroupBox(tr("Dose Shift (mm)"));
+    shiftBox->setTitleColor(theme.textColor());
+    QObject::connect(&theme, &ThemeManager::textColorChanged, shiftBox,
+                     [shiftBox](const QColor &color) { shiftBox->setTitleColor(color); });
+    shiftBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    auto *shiftLayout = new QFormLayout();
+    m_shiftX = new QDoubleSpinBox();
+    m_shiftY = new QDoubleSpinBox();
+    m_shiftZ = new QDoubleSpinBox();
+    for (auto *sb : {m_shiftX, m_shiftY, m_shiftZ}) {
+      sb->setDecimals(2);
+      sb->setRange(-1000.0, 1000.0);
+      sb->setValue(0.0);
+      sb->setSingleStep(1.0);
+      sb->setMaximumWidth(90);
+    }
+    QLabel *xLabel = new QLabel(tr("X"));
+    theme.applyTextColor(xLabel);
+    shiftLayout->addRow(xLabel, m_shiftX);
+    QLabel *yLabel = new QLabel(tr("Y"));
+    theme.applyTextColor(yLabel);
+    shiftLayout->addRow(yLabel, m_shiftY);
+    QLabel *zLabel = new QLabel(tr("Z"));
+    theme.applyTextColor(zLabel);
+    shiftLayout->addRow(zLabel, m_shiftZ);
+    shiftBox->setContentLayout(shiftLayout);
+    shiftBox->setCollapsed(true); // hidden by default as a special feature
+    main->addWidget(shiftBox);
+
+    setContentLayout(main);
+
+    // Notify parent to resize list item when expanded/collapsed
+    auto notify = [this]() {
+      if (layout())
+        layout()->invalidate();
+      updateGeometry();
+      emit uiExpandedChanged();
+    };
+    connect(this, &CollapsibleGroupBox::toggled, this, notify);
+    connect(shiftBox, &CollapsibleGroupBox::toggled, this, notify);
+
+    connect(m_check, &QCheckBox::toggled, this,
+            &DoseItemWidget::visibilityChanged);
+    auto emitChanged = [this]() {
+      emit settingsChanged();
+      updateTitleColor();
+    };
+    connect(m_dataFr, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            emitChanged);
+    connect(m_displayFr, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            emitChanged);
+    connect(m_factor, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            emitChanged);
+    connect(m_shiftX, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            emitChanged);
+    connect(m_shiftY, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            emitChanged);
+    connect(m_shiftZ, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            emitChanged);
+
+    updateTitleColor();
+  }
+
+  bool isChecked() const { return m_check->isChecked(); }
+  double dataFractions() const { return m_dataFr->value(); }
+  double displayFractions() const { return m_displayFr->value(); }
+  double factor() const { return m_factor->value(); }
+  double shiftX() const { return m_shiftX->value(); }
+  double shiftY() const { return m_shiftY->value(); }
+  double shiftZ() const { return m_shiftZ->value(); }
+  QVector3D shift() const { return QVector3D(shiftX(), shiftY(), shiftZ()); }
+
+  QString name() const { return m_filename; }
+  void setChecked(bool checked) {
+    QSignalBlocker b(m_check);
+    m_check->setChecked(checked);
+  }
+  void setDataFractions(double value) {
+    QSignalBlocker b(m_dataFr);
+    m_dataFr->setValue(value);
+    updateTitleColor();
+  }
+  void setDisplayFractions(double value) {
+    QSignalBlocker b(m_displayFr);
+    m_displayFr->setValue(value);
+    updateTitleColor();
+  }
+  void setFactor(double value) {
+    QSignalBlocker b(m_factor);
+    m_factor->setValue(value);
+    updateTitleColor();
+  }
+  void setShift(const QVector3D &s) {
+    QSignalBlocker bx(m_shiftX), by(m_shiftY), bz(m_shiftZ);
+    m_shiftX->setValue(s.x());
+    m_shiftY->setValue(s.y());
+    m_shiftZ->setValue(s.z());
+    updateTitleColor();
+  }
+
+  void setSaved(bool saved) {
+    m_isSaved = saved;
+    updateSaveButtonState();
+  }
+
+  bool isSaved() const { return m_isSaved; }
+
+signals:
+  void visibilityChanged(bool visible);
+  void settingsChanged();
+  void uiExpandedChanged();
+  void saveRequested();
+
+private:
+  QString m_filename;
+  QCheckBox *m_check{nullptr};
+  QPushButton *m_saveButton{nullptr};
+  QLabel *m_maxLabel{nullptr};
+  QDoubleSpinBox *m_dataFr{nullptr};
+  QDoubleSpinBox *m_displayFr{nullptr};
+  QDoubleSpinBox *m_factor{nullptr};
+  QDoubleSpinBox *m_shiftX{nullptr};
+  QDoubleSpinBox *m_shiftY{nullptr};
+  QDoubleSpinBox *m_shiftZ{nullptr};
+  bool m_isSaved{false};
+
+  void updateSaveButtonState() {
+    if (m_saveButton) {
+      if (m_isSaved) {
+        m_saveButton->setText(tr("Saved"));
+        m_saveButton->setEnabled(false);
+        m_saveButton->setStyleSheet("QPushButton { color: gray; }");
+      } else {
+        m_saveButton->setText(tr("Save"));
+        m_saveButton->setEnabled(true);
+        m_saveButton->setStyleSheet("");
+      }
+    }
+  }
+
+  void updateTitleColor() {
+    bool isDefault = qFuzzyIsNull(m_dataFr->value() - 1.0) &&
+                     qFuzzyIsNull(m_displayFr->value() - 1.0) &&
+                     qFuzzyIsNull(m_factor->value() - 1.0) &&
+                     qFuzzyIsNull(m_shiftX->value()) &&
+                     qFuzzyIsNull(m_shiftY->value()) &&
+                     qFuzzyIsNull(m_shiftZ->value());
+    if (isDefault) {
+      setTitleColor(ThemeManager::instance().textColor());
+    } else {
+      setTitleColor(QColor(255, 80, 80));
+    }
+  }
+};
+
+DicomViewer::DicomViewer(QWidget *parent, bool showControls)
+    : QWidget(parent), m_dicomReader(std::make_unique<DicomReader>()),
+      m_zoomFactor(DEFAULT_ZOOM), m_windowLevelDragActive(false),
+      m_dragStartWindow(256.0), m_dragStartLevel(128.0),
+      m_windowLevelTimer(new QTimer(this)), m_panTimer(new QTimer(this)),
+      m_zoomTimer(new QTimer(this)), m_panDragActive(false), m_panMode(false),
+      m_zoomDragActive(false), m_zoomMode(false),
+      m_zoomStartFactor(DEFAULT_ZOOM), m_gridWidget(nullptr),
+      m_showControls(showControls), m_viewMode(ViewMode::Single),
+      m_fourViewMode(false),
+      m_syncScale(true) // ★新規追加: デフォルトでスケール同期ON
+{
+  // 5画面表示などで極端に縮小されないよう最小サイズを設定
+  setMinimumSize(50, 50);
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_currentIndices[i] = 0;
+    m_originalImages[i] = QImage();
+    m_viewScrollAreas[i] = nullptr;
+    m_panOffsets[i] = QPointF(0.0, 0.0);
+    m_orientationButtons[i] = nullptr; // ★新規追加
+    m_colorBarPersistentVisibility[i] = false;
+  }
+  m_lmStudioClient = new LmStudioClient(this);
+  setupUI();
+  if (m_lmStudioClient) {
+    connect(m_lmStudioClient, &LmStudioClient::requestStarted, this,
+            &DicomViewer::onAiRequestStarted);
+    connect(m_lmStudioClient, &LmStudioClient::requestFinished, this,
+            &DicomViewer::onAiRequestFinished);
+    connect(m_lmStudioClient, &LmStudioClient::requestFailed, this,
+            &DicomViewer::onAiRequestError);
+    connect(m_lmStudioClient, &LmStudioClient::modelsUpdated, this,
+            &DicomViewer::onAiModelsReceived);
+    connect(m_lmStudioClient, &LmStudioClient::modelsFetchFailed, this,
+            &DicomViewer::onAiModelsFetchFailed);
+  }
+
+  // Initialize WhisperClient and AudioRecorder
+  m_whisperClient = new WhisperClient(this);
+  m_audioRecorder = new AudioRecorder(this);
+
+  if (m_whisperClient) {
+    connect(m_whisperClient, &WhisperClient::transcriptionReady, this,
+            &DicomViewer::onWhisperTranscriptionReady);
+    connect(m_whisperClient, &WhisperClient::error, this,
+            &DicomViewer::onWhisperError);
+    connect(m_whisperClient, &WhisperClient::modelLoaded, this,
+            &DicomViewer::onWhisperModelLoaded);
+
+    // Try to load any available Whisper model
+    // This will try multiple model sizes (tiny, base, small, etc.) and multiple paths
+    qDebug() << "Attempting to load available Whisper model...";
+    m_whisperClient->loadAnyAvailableModel();
+  }
+
+  if (m_audioRecorder) {
+    connect(m_audioRecorder, &AudioRecorder::recordingStarted, this,
+            &DicomViewer::onAudioRecordingStarted);
+    connect(m_audioRecorder, &AudioRecorder::recordingStopped, this,
+            &DicomViewer::onAudioRecordingStopped);
+    connect(m_audioRecorder, &AudioRecorder::audioLevelChanged, this,
+            &DicomViewer::onAudioLevelChanged);
+    connect(m_audioRecorder, &AudioRecorder::error, this,
+            &DicomViewer::onWhisperError);
+  }
+
+  loadAiSettings();
+
+  // Initialize WebServer for Vision Pro integration
+  m_webServer = new WebServer(this, this);
+  if (m_webServer) {
+    connect(m_webServer, &WebServer::serverStarted, this, [](quint16 port) {
+      qInfo() << "Vision Pro Web Server started on port" << port;
+    });
+    connect(m_webServer, &WebServer::serverStopped, this, []() {
+      qInfo() << "Vision Pro Web Server stopped";
+    });
+    // Auto-start web server with HTTPS enabled for Vision Pro WebXR support
+    // Use port 8443 for HTTPS (default SSL port for development)
+    // If SSL certificates are not available, it will fall back to HTTP on port 8080
+    bool useSSL = true;
+    quint16 port = useSSL ? 8443 : 8080;
+    m_webServer->start(port, useSSL);
+  }
+
+  m_viewOrientations[0] = DicomVolume::Orientation::Axial;
+  m_viewOrientations[1] = DicomVolume::Orientation::Sagittal;
+  m_viewOrientations[2] = DicomVolume::Orientation::Coronal;
+  m_viewOrientations[3] = DicomVolume::Orientation::Coronal;
+  m_viewOrientations[4] = DicomVolume::Orientation::Axial;
+
+  loadProfileLinePresets();
+
+  // タイマー設定
+  m_windowLevelTimer->setSingleShot(true);
+  connect(m_windowLevelTimer, &QTimer::timeout, this,
+          &DicomViewer::onWindowLevelTimeout);
+
+  m_panTimer->setSingleShot(true);
+  connect(m_panTimer, &QTimer::timeout, this, &DicomViewer::onPanTimeout);
+  m_zoomTimer->setSingleShot(true);
+  connect(m_zoomTimer, &QTimer::timeout, this, &DicomViewer::onZoomTimeout);
+
+  // Auto-load Ir source data if previously saved
+  autoLoadBrachySourceData();
+
+  // キーボードフォーカスを有効にする
+  setFocusPolicy(Qt::StrongFocus);
+}
+
+DicomViewer::~DicomViewer() {
+  if (m_cyberknifeDoseWatcher) {
+    m_cyberknifeDoseWatcher->cancel();
+    m_cyberknifeDoseWatcher->waitForFinished();
+  }
+  saveAiSettings();
+
+  // Stop web server
+  if (m_webServer) {
+    m_webServer->stop();
+    delete m_webServer;
+    m_webServer = nullptr;
+  }
+}
+
+void DicomViewer::setFourViewMode(bool enabled) {
+  setViewMode(enabled ? ViewMode::Quad : ViewMode::Single);
+  m_fourViewMode = enabled;
+}
+
+void DicomViewer::setViewMode(ViewMode mode) {
+  if (m_viewMode == mode)
+    return;
+  if (m_fusionViewActive && m_restoreViewModeAfterFusion &&
+      mode != ViewMode::Dual) {
+    m_restoreViewModeAfterFusion = false;
+  }
+  m_viewMode = mode;
+
+  updateViewLayout();
+  m_activeViewIndex = clampToVisibleViewIndex(m_activeViewIndex);
+
+  if (mode == ViewMode::Five) {
+    // 画面切替後に時間差で各ビューを設定
+    auto setupImageView = [this](int idx, DicomVolume::Orientation ori) {
+      if (m_viewMode != ViewMode::Five)
+        return;
+      setViewToImage(idx);
+      m_viewOrientations[idx] = ori;
+      int count = sliceCountForOrientation(ori);
+      m_sliceSliders[idx]->setRange(0, count > 0 ? count - 1 : 0);
+      int mid = count > 0 ? count / 2 : 0;
+      m_currentIndices[idx] = mid;
+      m_sliceSliders[idx]->setValue(mid);
+      loadVolumeSlice(idx, mid);
+    };
+
+    QTimer::singleShot(0, this, [this, setupImageView]() {
+      setupImageView(0, DicomVolume::Orientation::Axial); // 左上
+    });
+    QTimer::singleShot(100, this, [this]() {
+      if (m_viewMode != ViewMode::Five)
+        return;
+      setViewTo3D(1); // 右上
+    });
+    QTimer::singleShot(200, this, [this, setupImageView]() {
+      setupImageView(2, DicomVolume::Orientation::Sagittal); // 左下左
+    });
+    QTimer::singleShot(300, this, [this, setupImageView]() {
+      setupImageView(3, DicomVolume::Orientation::Coronal); // 左下右
+    });
+    QTimer::singleShot(400, this, [this]() {
+      if (m_viewMode != ViewMode::Five)
+        return;
+      setViewToDVH(4); // 右下
+    });
+    QTimer::singleShot(500, this, [this]() {
+      if (m_viewMode != ViewMode::Five)
+        return;
+      updateSliceLabels();
+      updateSliderPosition();
+      updateImage();
+      updateColorBars();
+      updateOrientationButtonTexts();
+    });
+  } else if (mode == ViewMode::Quad) {
+    auto setupImageView = [this](int idx, DicomVolume::Orientation ori) {
+      if (m_viewMode != ViewMode::Quad)
+        return;
+      setViewToImage(idx);
+      m_viewOrientations[idx] = ori;
+      int count = sliceCountForOrientation(ori);
+      m_sliceSliders[idx]->setRange(0, count > 0 ? count - 1 : 0);
+      int mid = count > 0 ? count / 2 : 0;
+      m_currentIndices[idx] = mid;
+      m_sliceSliders[idx]->setValue(mid);
+      loadVolumeSlice(idx, mid);
+    };
+
+    QTimer::singleShot(0, this, [this, setupImageView]() {
+      setupImageView(0, DicomVolume::Orientation::Axial); // 左上
+    });
+    QTimer::singleShot(100, this, [this, setupImageView]() {
+      setupImageView(1, DicomVolume::Orientation::Sagittal); // 右上
+    });
+    QTimer::singleShot(200, this, [this, setupImageView]() {
+      setupImageView(2, DicomVolume::Orientation::Coronal); // 左下
+    });
+    QTimer::singleShot(300, this, [this]() {
+      if (m_viewMode != ViewMode::Quad)
+        return;
+      setViewToDVH(3); // 右下
+    });
+    QTimer::singleShot(400, this, [this]() {
+      if (m_viewMode != ViewMode::Quad)
+        return;
+      updateSliceLabels();
+      updateSliderPosition();
+      updateImage();
+      updateColorBars();
+      updateOrientationButtonTexts();
+    });
+  } else {
+    updateSliderPosition();
+    updateImage();
+    updateColorBars();
+  }
+}
+
+void DicomViewer::setupUI() {
+  m_mainLayout = new QVBoxLayout(this);
+  ThemeManager &theme = ThemeManager::instance();
+
+  // メインスプリッター（画像表示エリアとコントロールエリア）
+  QSplitter *mainSplitter = new QSplitter(Qt::Horizontal, this);
+
+  // 画像表示エリアとスライダーコンテナ
+  m_imageContainer = new QWidget();
+  QHBoxLayout *imageLayout = new QHBoxLayout(m_imageContainer);
+  imageLayout->setContentsMargins(0, 0, 0, 0);
+
+  m_scrollArea = new QScrollArea();
+  m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  m_scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  m_scrollArea->setAlignment(Qt::AlignCenter);
+
+  m_gridWidget = new QWidget();
+  m_imageLayout = new QGridLayout(m_gridWidget);
+  m_imageLayout->setSpacing(2);
+  m_imageLayout->setContentsMargins(0, 0, 0, 0);
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_viewContainers[i] = new QWidget();
+    QVBoxLayout *cellMainLayout = new QVBoxLayout(m_viewContainers[i]);
+    cellMainLayout->setContentsMargins(0, 0, 0, 0);
+    cellMainLayout->setSpacing(2);
+
+    // ★変更: 方向変更ボタンと画像切り替えボタンをオーバーレイとして配置
+    m_orientationButtons[i] = new QPushButton(m_viewContainers[i]);
+    m_orientationButtons[i]->setMaximumHeight(25);
+    const QString topButtonStyle =
+        QStringLiteral(
+            "QPushButton {"
+            "    background-color: rgba(0,0,0,180);"
+            "    color: %1;"
+            "    border: 1px solid #444444;"
+            "    padding: 2px 8px;"
+            "    font-size: 10px;"
+            "}"
+            "QPushButton:hover {"
+            "    background-color: rgba(50,50,150,200);"
+            "}");
+    const QString interactionButtonStyle =
+        QStringLiteral(
+            "QPushButton {"
+            "    background-color: rgba(0,0,0,180);"
+            "    color: %1;"
+            "    border: 1px solid #444444;"
+            "    padding: 2px 6px;"
+            "    font-size: 10px;"
+            "}"
+            "QPushButton:hover {"
+            "    background-color: rgba(50,50,150,200);"
+            "}"
+            "QPushButton:checked {"
+            "    background-color: #FF6B35;"
+            "    border: 1px solid #FF6B35;"
+            "}");
+    theme.applyTextColor(m_orientationButtons[i], topButtonStyle);
+    connect(m_orientationButtons[i], &QPushButton::clicked, this,
+            [this, i]() { showOrientationMenuForView(i); });
+    m_orientationButtons[i]->raise();
+
+    // Image toggle button (for 3D view only)
+    m_imageToggleButtons[i] = new QPushButton(m_viewContainers[i]);
+    m_imageToggleButtons[i]->setText("Image");
+    m_imageToggleButtons[i]->setMaximumHeight(25);
+    theme.applyTextColor(m_imageToggleButtons[i], topButtonStyle);
+    connect(m_imageToggleButtons[i], &QPushButton::clicked, this,
+            [this, i]() { onImageToggleClicked(i); });
+    m_imageToggleButtons[i]->setVisible(false); // Hidden by default, shown only in 3D view
+    m_imageToggleButtons[i]->raise();
+
+    // Line toggle button (for 3D view only - Structure Lines)
+    m_lineToggleButtons[i] = new QPushButton(m_viewContainers[i]);
+    m_lineToggleButtons[i]->setText("Line");
+    m_lineToggleButtons[i]->setMaximumHeight(25);
+    theme.applyTextColor(m_lineToggleButtons[i], topButtonStyle);
+    connect(m_lineToggleButtons[i], &QPushButton::clicked, this,
+            [this, i]() { onLineToggleClicked(i); });
+    m_lineToggleButtons[i]->setVisible(false); // Hidden by default, shown only in 3D view
+    m_lineToggleButtons[i]->raise();
+
+    // Surface toggle button (for 3D view only - Structure Surfaces)
+    m_surfaceToggleButtons[i] = new QPushButton(m_viewContainers[i]);
+    m_surfaceToggleButtons[i]->setText("Surface");
+    m_surfaceToggleButtons[i]->setMaximumHeight(25);
+    theme.applyTextColor(m_surfaceToggleButtons[i], topButtonStyle);
+    connect(m_surfaceToggleButtons[i], &QPushButton::clicked, this,
+            [this, i]() { onSurfaceToggleClicked(i); });
+    m_surfaceToggleButtons[i]->setVisible(false); // Hidden by default, shown only in 3D view
+    m_surfaceToggleButtons[i]->raise();
+
+    // Export button (for 3D view only - VisionPro USDZ export)
+    m_exportButtons[i] = new QPushButton(m_viewContainers[i]);
+    m_exportButtons[i]->setText("Export");
+    m_exportButtons[i]->setMaximumHeight(25);
+    theme.applyTextColor(m_exportButtons[i], topButtonStyle);
+    connect(m_exportButtons[i], &QPushButton::clicked, this,
+            [this, i]() { onExportButtonClicked(i); });
+    m_exportButtons[i]->setVisible(false); // Hidden by default, shown only in 3D view
+    m_exportButtons[i]->raise();
+
+    m_imageSeriesButtons[i] = new QPushButton(m_viewContainers[i]);
+    m_imageSeriesButtons[i]->setMaximumHeight(25);
+    theme.applyTextColor(m_imageSeriesButtons[i], topButtonStyle);
+    m_imageSeriesButtons[i]->setVisible(false);
+    connect(m_imageSeriesButtons[i], &QPushButton::clicked, this,
+            [this, i]() { showImageSeriesMenu(i); });
+    m_imageSeriesButtons[i]->raise();
+
+    m_viewWindowLevelButtons[i] =
+        new QPushButton(tr("W/L"), m_viewContainers[i]);
+    m_viewWindowLevelButtons[i]->setCheckable(true);
+    theme.applyTextColor(m_viewWindowLevelButtons[i], interactionButtonStyle);
+    m_viewWindowLevelButtons[i]->hide();
+    m_viewWindowLevelButtons[i]->raise();
+    connect(m_viewWindowLevelButtons[i], &QPushButton::toggled, this,
+            [this, i](bool checked) { onViewWindowLevelToggled(i, checked); });
+
+    m_viewPanButtons[i] = new QPushButton(tr("Pan"), m_viewContainers[i]);
+    m_viewPanButtons[i]->setCheckable(true);
+    theme.applyTextColor(m_viewPanButtons[i], interactionButtonStyle);
+    m_viewPanButtons[i]->hide();
+    m_viewPanButtons[i]->raise();
+    connect(m_viewPanButtons[i], &QPushButton::toggled, this,
+            [this, i](bool checked) { onViewPanToggled(i, checked); });
+
+    m_viewZoomButtons[i] = new QPushButton(tr("Zoom"), m_viewContainers[i]);
+    m_viewZoomButtons[i]->setCheckable(true);
+    theme.applyTextColor(m_viewZoomButtons[i], interactionButtonStyle);
+    m_viewZoomButtons[i]->hide();
+    m_viewZoomButtons[i]->raise();
+    connect(m_viewZoomButtons[i], &QPushButton::toggled, this,
+            [this, i](bool checked) { onViewZoomToggled(i, checked); });
+
+    // 画像表示エリアのレイアウトをスタックに配置
+    m_imagePanels[i] = new QWidget();
+    QHBoxLayout *cellLayout = new QHBoxLayout(m_imagePanels[i]);
+    cellLayout->setContentsMargins(0, 0, 0, 0);
+    cellLayout->setSpacing(0);
+
+    m_imageWidgets[i] = new OpenGLImageWidget();
+    m_imageWidgets[i]->setStructureLineWidth(m_structureLineWidth);
+    m_imageWidgets[i]->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_imageWidgets[i], &OpenGLImageWidget::doubleClicked, this,
+            [this, i]() { onImageDoubleClicked(i); });
+    connect(m_imageWidgets[i], &OpenGLImageWidget::customContextMenuRequested,
+            this, [this, i](const QPoint &pos) { showJumpToMenu(i, pos); });
+
+    m_viewScrollAreas[i] = new QScrollArea(m_viewContainers[i]);
+    m_viewScrollAreas[i]->setWidget(m_imageWidgets[i]);
+    m_viewScrollAreas[i]->setWidgetResizable(true);
+    m_viewScrollAreas[i]->setFrameShape(QFrame::NoFrame);
+    m_viewScrollAreas[i]->setAlignment(Qt::AlignCenter);
+    m_viewScrollAreas[i]->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_viewScrollAreas[i]->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_imageWidgets[i]->installEventFilter(this);
+    cellLayout->addWidget(m_viewScrollAreas[i], 1);
+
+    // カラーバーを追加
+    m_colorBars[i] = new DoseColorBar(m_viewContainers[i]);
+    m_colorBars[i]->setVisible(false);
+    cellLayout->addWidget(m_colorBars[i]);
+
+    m_sliceSliders[i] = new QSlider(Qt::Vertical);
+    m_sliceSliders[i]->setRange(0, 0);
+    m_sliceSliders[i]->setEnabled(false);
+    cellLayout->addWidget(m_sliceSliders[i]);
+
+    m_dvhWidgets[i] = new DVHWindow(m_viewContainers[i]);
+    connect(m_dvhWidgets[i], &DVHWindow::recalculateRequested, this,
+            &DicomViewer::onDvhCalculationRequested, Qt::QueuedConnection);
+    connect(m_dvhWidgets[i], &DVHWindow::doubleClicked, this,
+            [this, i]() { onImageDoubleClicked(i); });
+    connect(m_dvhWidgets[i], &DVHWindow::visibilityChanged, this,
+            &DicomViewer::onDvhVisibilityChanged);
+    connect(m_dvhWidgets[i], &DVHWindow::calcMaxChanged, this,
+            &DicomViewer::onDvhCalcMaxChanged);
+    m_dvhWidgets[i]->hide();
+
+    m_3dWidgets[i] = new OpenGL3DWidget(m_viewContainers[i]);
+    m_3dWidgets[i]->hide();
+
+    m_profileWidgets[i] = new DoseProfileWindow(m_viewContainers[i]);
+    connect(m_profileWidgets[i], &DoseProfileWindow::requestLineSelection, this,
+            [this, i]() { onProfileLineSelection(i); });
+    connect(m_profileWidgets[i], &DoseProfileWindow::saveLineRequested, this,
+            [this, i](int slot) { onProfileLineSaveRequested(i, slot); });
+    connect(m_profileWidgets[i], &DoseProfileWindow::loadLineRequested, this,
+            [this, i](int slot) { onProfileLineLoadRequested(i, slot); });
+    m_profileWidgets[i]->hide();
+
+    m_viewStacks[i] = new QStackedLayout();
+    m_viewStacks[i]->addWidget(m_imagePanels[i]);
+    m_viewStacks[i]->addWidget(m_dvhWidgets[i]);
+    m_viewStacks[i]->addWidget(m_3dWidgets[i]);
+    m_viewStacks[i]->addWidget(m_profileWidgets[i]);
+    cellMainLayout->addLayout(m_viewStacks[i], 1);
+    m_viewStacks[i]->setCurrentWidget(m_imagePanels[i]);
+    // ラベル類
+    m_sliceIndexLabels[i] = new QLabel(m_viewContainers[i]);
+    // Ax/Sag/Cor などの情報ラベルは背景を透明化
+    theme.applyTextColor(
+        m_sliceIndexLabels[i],
+        QStringLiteral(
+            "QLabel { background-color: transparent; color: %1; font-size: "
+            "10px; }"));
+    m_sliceIndexLabels[i]->hide();
+
+    m_infoOverlays[i] = new QLabel(m_viewContainers[i]);
+    theme.applyTextColor(
+        m_infoOverlays[i],
+        QStringLiteral(
+            "QLabel { background-color: transparent; color: %1; font-size: "
+            "10px; }"));
+    m_infoOverlays[i]->hide();
+    m_infoOverlays[i]->installEventFilter(this);
+
+    // Dose information indicator (Dose Shift / BED / EqD2)
+    m_doseShiftLabels[i] = new QLabel(m_viewContainers[i]);
+    m_doseShiftLabels[i]->setStyleSheet(
+        "QLabel { background-color: transparent; color: red; font-weight: "
+        "bold; font-size: 12px; }");
+    m_doseShiftLabels[i]->hide();
+
+    m_coordLabels[i] = new QLabel(m_viewContainers[i]);
+    theme.applyTextColor(
+        m_coordLabels[i],
+        QStringLiteral(
+            "QLabel { background-color: transparent; color: %1; font-size: "
+            "10px; }"));
+    m_coordLabels[i]->hide();
+
+    m_cursorDoseLabels[i] = new QLabel(m_viewContainers[i]);
+    theme.applyTextColor(
+        m_cursorDoseLabels[i],
+        QStringLiteral(
+            "QLabel { background-color: transparent; color: %1; font-size: "
+            "10px; }"));
+    m_cursorDoseLabels[i]->hide();
+
+    m_imageLayout->addWidget(m_viewContainers[i], i / 2, i % 2);
+  }
+
+  // 初期の方向ボタンテキストを設定
+  updateOrientationButtonTexts();
+
+  m_scrollArea->setWidget(m_gridWidget);
+  m_scrollArea->setWidgetResizable(true);
+  m_scrollArea->viewport()->installEventFilter(this);
+  imageLayout->addWidget(m_scrollArea, 1);
+
+  updateSliderPosition();
+
+  // コントロールパネル
+  QWidget *controlPanel = new QWidget(this);
+  controlPanel->setFixedWidth(300);
+  QVBoxLayout *controlLayout = new QVBoxLayout(controlPanel);
+
+  // Window Level controls
+  m_windowLevelGroup = new CollapsibleGroupBox("Window Level");
+  m_windowLevelGroup->setTitleColor(theme.textColor());
+  QObject::connect(&theme, &ThemeManager::textColorChanged,
+                   m_windowLevelGroup,
+                   [group = m_windowLevelGroup](const QColor &color) {
+                     group->setTitleColor(color);
+                   });
+  QGridLayout *wlLayout = new QGridLayout();
+  wlLayout->setContentsMargins(5, 5, 5, 5);
+  m_windowLevelGroup->setContentLayout(wlLayout);
+
+  // Window controls
+  QLabel *windowLabel = new QLabel("Window:");
+  theme.applyTextColor(windowLabel);
+  wlLayout->addWidget(windowLabel, 0, 0);
+  m_windowSlider = new QSlider(Qt::Horizontal);
+  m_windowSlider->setRange(1, 4096);
+  m_windowSlider->setValue(256);
+  m_windowSpinBox = new QSpinBox();
+  m_windowSpinBox->setRange(1, 4096);
+  m_windowSpinBox->setValue(256);
+  wlLayout->addWidget(m_windowSlider, 0, 1);
+  wlLayout->addWidget(m_windowSpinBox, 0, 2);
+
+  // Level controls
+  QLabel *levelLabel = new QLabel("Level:");
+  theme.applyTextColor(levelLabel);
+  wlLayout->addWidget(levelLabel, 1, 0);
+  m_levelSlider = new QSlider(Qt::Horizontal);
+  m_levelSlider->setRange(-1024, 3072);
+  m_levelSlider->setValue(128);
+  m_levelSpinBox = new QSpinBox();
+  m_levelSpinBox->setRange(-1024, 3072);
+  m_levelSpinBox->setValue(128);
+  wlLayout->addWidget(m_levelSlider, 1, 1);
+  wlLayout->addWidget(m_levelSpinBox, 1, 2);
+
+  // Slice Position checkbox
+  m_slicePositionCheck = new QCheckBox("Slice Position");
+  theme.applyTextColor(m_slicePositionCheck);
+  wlLayout->addWidget(m_slicePositionCheck, 2, 0, 1, 3);
+  connect(m_slicePositionCheck, &QCheckBox::toggled, this,
+          &DicomViewer::onSlicePositionToggled);
+  // Grid + Dose Guide (same row)
+  QHBoxLayout *gridGuideRow = new QHBoxLayout();
+  m_gridCheck = new QCheckBox("Grid");
+  theme.applyTextColor(m_gridCheck);
+  gridGuideRow->addWidget(m_gridCheck);
+  connect(m_gridCheck, &QCheckBox::toggled, this, [this](bool on) {
+    m_showGrid = on;
+    updateImage();
+  });
+  m_doseGuideCheck = new QCheckBox("Guide");
+  theme.applyTextColor(m_doseGuideCheck);
+  m_doseGuideCheck->setChecked(m_showDoseGuide);
+  gridGuideRow->addWidget(m_doseGuideCheck);
+  connect(m_doseGuideCheck, &QCheckBox::toggled, this, [this](bool on) {
+    m_showDoseGuide = on;
+    updateImage();
+  });
+  gridGuideRow->addStretch();
+  wlLayout->addLayout(gridGuideRow, 3, 0, 1, 3);
+
+  // Window/Level調整・Pan・Zoom ボタン
+  m_windowLevelButton = new QPushButton("W/L Adjust");
+  m_windowLevelButton->setCheckable(true);
+  const QString wlButtonStyle =
+      QStringLiteral(
+          "QPushButton {"
+          "    background-color: #444444;"
+          "    color: %1;"
+          "    border: 1px solid #666666;"
+          "    padding: 5px;"
+          "    border-radius: 3px;"
+          "}"
+          "QPushButton:hover {"
+          "    background-color: #555555;"
+          "}"
+          "QPushButton:checked {"
+          "    background-color: #FF6B35;"
+          "    border: 1px solid #FF6B35;"
+          "}");
+  theme.applyTextColor(m_windowLevelButton, wlButtonStyle);
+  m_panButton = new QPushButton("Pan");
+  m_panButton->setCheckable(true);
+  theme.applyTextColor(m_panButton, wlButtonStyle);
+  m_zoomButton = new QPushButton("Zoom");
+  m_zoomButton->setCheckable(true);
+  theme.applyTextColor(m_zoomButton, wlButtonStyle);
+
+  // 操作ボタンを横並びで配置
+  QHBoxLayout *wlButtonLayout = new QHBoxLayout();
+  wlButtonLayout->addWidget(m_windowLevelButton);
+  wlButtonLayout->addWidget(m_panButton);
+  wlButtonLayout->addWidget(m_zoomButton);
+  // Place operation buttons below grid toggle
+  wlLayout->addLayout(wlButtonLayout, 4, 0, 1, 3);
+
+  // Dose display controls
+  if (m_showControls) {
+    m_doseGroup = new CollapsibleGroupBox("Dose Display");
+    m_doseGroup->setTitleColor(theme.textColor());
+    QObject::connect(&theme, &ThemeManager::textColorChanged, m_doseGroup,
+                     [group = m_doseGroup](const QColor &color) {
+                       group->setTitleColor(color);
+                     });
+    QVBoxLayout *doseLayout = new QVBoxLayout();
+    doseLayout->setContentsMargins(5, 5, 5, 5);
+
+    QHBoxLayout *modeLayout = new QHBoxLayout();
+    QLabel *colorMapLabel = new QLabel("Color Map:");
+    theme.applyTextColor(colorMapLabel);
+    modeLayout->addWidget(colorMapLabel);
+    m_doseColorMapCombo = new QComboBox();
+    m_doseColorMapCombo->addItem("Colorful");
+    m_doseColorMapCombo->addItem("Isodose");
+    m_doseColorMapCombo->addItem("Isodose Lines");
+    m_doseColorMapCombo->addItem("Simple");
+    m_doseColorMapCombo->addItem("Hot");
+    connect(m_doseColorMapCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &DicomViewer::onDoseDisplayModeChanged);
+    modeLayout->addWidget(m_doseColorMapCombo);
+    doseLayout->addLayout(modeLayout);
+
+    QGridLayout *rangeLayout = new QGridLayout();
+    QLabel *minLabel = new QLabel("Min:");
+    theme.applyTextColor(minLabel);
+    rangeLayout->addWidget(minLabel, 0, 0);
+    m_doseMinSpinBox = new QDoubleSpinBox();
+    m_doseMinSpinBox->setDecimals(4);
+    m_doseMinSpinBox->setRange(-1000.0, 1000.0);
+    rangeLayout->addWidget(m_doseMinSpinBox, 0, 1);
+    QLabel *maxLabel = new QLabel("Max:");
+    theme.applyTextColor(maxLabel);
+    rangeLayout->addWidget(maxLabel, 1, 0);
+    m_doseMaxSpinBox = new QDoubleSpinBox();
+    m_doseMaxSpinBox->setDecimals(4);
+    m_doseMaxSpinBox->setRange(-1000.0, 1000.0);
+    rangeLayout->addWidget(m_doseMaxSpinBox, 1, 1);
+    connect(m_doseMinSpinBox,
+            QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+            &DicomViewer::updateColorBars);
+    connect(m_doseMaxSpinBox,
+            QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+            &DicomViewer::updateColorBars);
+    connect(m_doseMinSpinBox, &QDoubleSpinBox::editingFinished, this,
+            &DicomViewer::onDoseRangeEditingFinished);
+    connect(m_doseMaxSpinBox, &QDoubleSpinBox::editingFinished, this,
+            &DicomViewer::onDoseRangeEditingFinished);
+    doseLayout->addLayout(rangeLayout);
+
+    QHBoxLayout *opacityLayout = new QHBoxLayout();
+    QLabel *opacityLabel = new QLabel("Opacity:");
+    theme.applyTextColor(opacityLabel);
+    opacityLayout->addWidget(opacityLabel);
+    m_doseOpacitySlider = new QSlider(Qt::Horizontal);
+    m_doseOpacitySlider->setRange(0, 100);
+    m_doseOpacitySlider->setValue(80);
+    m_doseOpacitySlider->setFixedHeight(20);
+    connect(m_doseOpacitySlider, &QSlider::valueChanged, this,
+            &DicomViewer::onDoseOpacityChanged);
+    opacityLayout->addWidget(m_doseOpacitySlider);
+    doseLayout->addLayout(opacityLayout);
+    // Always native geometry (toggle removed)
+    m_doseGroup->setContentLayout(doseLayout);
+  }
+
+  // Zoom controls (only reset and fit)
+  m_zoomGroup = new CollapsibleGroupBox("Zoom");
+  m_zoomGroup->setTitleColor(theme.textColor());
+  QObject::connect(&theme, &ThemeManager::textColorChanged, m_zoomGroup,
+                   [group = m_zoomGroup](const QColor &color) {
+                     group->setTitleColor(color);
+                   });
+  QGridLayout *zoomLayout = new QGridLayout();
+  zoomLayout->setContentsMargins(5, 5, 5, 5);
+  m_resetZoomButton = new QPushButton("Reset");
+  m_fitToWindowButton = new QPushButton("Fit to Window");
+  zoomLayout->addWidget(m_resetZoomButton, 0, 0);
+  zoomLayout->addWidget(m_fitToWindowButton, 0, 1);
+  m_zoomGroup->setContentLayout(zoomLayout);
+
+  // 画像情報
+  m_infoGroup = new CollapsibleGroupBox("Image Information");
+  m_infoGroup->setTitleColor(theme.textColor());
+  QObject::connect(&theme, &ThemeManager::textColorChanged, m_infoGroup,
+                   [group = m_infoGroup](const QColor &color) {
+                     group->setTitleColor(color);
+                   });
+  m_privacyButton = new QToolButton();
+  m_privacyButton->setText("P");
+  m_privacyButton->setAutoRaise(true);
+  m_privacyButton->setFixedSize(16, 16);
+  m_privacyButton->setToolTip("Toggle Privacy Mode");
+  m_privacyButton->setStyleSheet(
+      "border: 1px solid gray; color: gray;" // ← 文字色をグレーに指定
+  );
+  // m_privacyButton->setStyleSheet("border: 1px solid gray;");
+  m_infoGroup->addHeaderWidget(m_privacyButton);
+  connect(m_privacyButton, &QToolButton::clicked, this, [this]() {
+    m_privacyMode = !m_privacyMode;
+    updateImageInfo();
+    updateInfoOverlays();
+  });
+  QVBoxLayout *infoLayout = new QVBoxLayout();
+  m_infoTextBox = new QPlainTextEdit();
+  m_infoTextBox->setReadOnly(true);
+  m_infoTextBox->setPlainText("Patient: -\n"
+                              "Modality: -\n"
+                              "Study Date: -\n"
+                              "Size: -\n"
+                              "Study Desc: -\n"
+                              "Slice Thk: -\n"
+                              "Pixel Spacing: - x -\n"
+                              "CT File: -\n\n"
+                              "RT Dose: Not Loaded");
+  QPalette infoPal = m_infoTextBox->palette();
+  infoPal.setColor(QPalette::Base, QColor(32, 32, 32));
+  infoPal.setColor(QPalette::Text, theme.textColor());
+  m_infoTextBox->setPalette(infoPal);
+  QObject::connect(&theme, &ThemeManager::textColorChanged, m_infoTextBox,
+                   [textBox = m_infoTextBox](const QColor &color) {
+                     QPalette pal = textBox->palette();
+                     pal.setColor(QPalette::Text, color);
+                     textBox->setPalette(pal);
+                   });
+  m_infoTextBox->installEventFilter(this);
+  infoLayout->addWidget(m_infoTextBox);
+
+  QHBoxLayout *doseRefLayout = new QHBoxLayout();
+  doseRefLayout->addWidget(new QLabel("100% ="));
+  m_doseRefSpinBox = new QDoubleSpinBox();
+  m_doseRefSpinBox->setDecimals(4);
+  m_doseRefSpinBox->setRange(-1000.0, 1000.0);
+  m_doseRefSpinBox->setSuffix(" Gy");
+  doseRefLayout->addWidget(m_doseRefSpinBox);
+  doseRefLayout->addStretch();
+  infoLayout->addLayout(doseRefLayout);
+
+  m_doseRefMaxButton = new QPushButton("100% = MaxDose");
+  infoLayout->addWidget(m_doseRefMaxButton);
+
+  connect(m_doseRefSpinBox,
+          QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this](double v) {
+            m_doseReference = v;
+            updateColorBars();
+            updateImage();
+            for (int i = 0; i < VIEW_COUNT; ++i) {
+              if (m_dvhWidgets[i])
+                m_dvhWidgets[i]->setPrescriptionDose(v);
+            }
+          });
+
+  connect(m_doseRefMaxButton, &QPushButton::clicked, this, [this]() {
+    double maxDose = m_resampledDose.maxDose();
+    m_doseRefSpinBox->setValue(maxDose);
+  });
+  m_infoGroup->setContentLayout(infoLayout);
+
+  // Structures
+  m_structureGroup = new CollapsibleGroupBox("Structures");
+  m_structureGroup->setTitleColor(theme.textColor());
+  QObject::connect(&theme, &ThemeManager::textColorChanged, m_structureGroup,
+                   [group = m_structureGroup](const QColor &color) {
+                     group->setTitleColor(color);
+                   });
+  QVBoxLayout *structLayout = new QVBoxLayout();
+  m_structureList = new QListWidget();
+  structLayout->addWidget(m_structureList);
+
+  QHBoxLayout *pointWidthLayout = new QHBoxLayout();
+  m_showPointsCheck = new QCheckBox("Points");
+  theme.applyTextColor(m_showPointsCheck);
+  m_showPointsCheck->setChecked(m_showStructurePoints);
+  pointWidthLayout->addWidget(m_showPointsCheck);
+
+  QLabel *lineWidthLabel = new QLabel("Width");
+  theme.applyTextColor(
+      lineWidthLabel, QStringLiteral("font-size:10px; color:%1;"));
+  m_structureLineWidthSpin = new QSpinBox();
+  m_structureLineWidthSpin->setRange(1, 3);
+  m_structureLineWidthSpin->setValue(m_structureLineWidth);
+  m_structureLineWidthSpin->setFixedWidth(40);
+  pointWidthLayout->addWidget(lineWidthLabel);
+  pointWidthLayout->addWidget(m_structureLineWidthSpin);
+  pointWidthLayout->addStretch();
+  structLayout->addLayout(pointWidthLayout);
+  QHBoxLayout *structBtnLayout = new QHBoxLayout();
+  m_structureAllButton = new QPushButton("All");
+  m_structureNoneButton = new QPushButton("None");
+  m_dvhButton = new QPushButton("DVH");
+  structBtnLayout->addWidget(m_structureAllButton);
+  structBtnLayout->addWidget(m_structureNoneButton);
+  structBtnLayout->addWidget(m_dvhButton);
+  structLayout->addLayout(structBtnLayout);
+  m_structureGroup->setContentLayout(structLayout);
+
+  // コントロールパネルにウィジェットを追加
+  controlLayout->addWidget(m_infoGroup);
+  controlLayout->addWidget(m_windowLevelGroup);
+  if (m_showControls && m_doseGroup) {
+    controlLayout->addWidget(m_doseGroup);
+  }
+  controlLayout->addWidget(m_zoomGroup);
+  controlLayout->addWidget(m_structureGroup);
+  controlLayout->addStretch();
+
+  // DoseManagerパネル（右側タブ）
+  m_doseManagerPanel = new QWidget(this);
+  QVBoxLayout *doseMgrLayout = new QVBoxLayout(m_doseManagerPanel);
+  doseMgrLayout->setContentsMargins(0, 0, 0, 0);
+  QHBoxLayout *doseHeader = new QHBoxLayout();
+  doseHeader->addWidget(new QLabel("RT Dose"));
+  m_doseModeCombo = new QComboBox();
+  m_doseModeCombo->addItem(tr("Physical Dose"),
+                           QVariant(int(DoseCalcMode::Physical)));
+  m_doseModeCombo->addItem(tr("BED"), QVariant(int(DoseCalcMode::BED)));
+  m_doseModeCombo->addItem(tr("EqD2"), QVariant(int(DoseCalcMode::EqD2)));
+  doseHeader->addWidget(m_doseModeCombo);
+  doseHeader->addWidget(new QLabel(QString::fromUtf8("α/β=")));
+  m_doseAlphaBetaSpin = new QDoubleSpinBox();
+  m_doseAlphaBetaSpin->setRange(0.1, 100.0);
+  m_doseAlphaBetaSpin->setValue(10.0);
+  m_doseAlphaBetaSpin->setEnabled(false);
+  doseHeader->addWidget(m_doseAlphaBetaSpin);
+  doseMgrLayout->addLayout(doseHeader);
+
+  m_doseCalcButton = new QPushButton(tr("Start Calculation"));
+  doseMgrLayout->addWidget(m_doseCalcButton);
+  m_doseIsosurfaceButton = new QPushButton(tr("3D Isosurface"));
+  doseMgrLayout->addWidget(m_doseIsosurfaceButton);
+  m_doseListWidget = new QListWidget();
+  m_doseListWidget->setWordWrap(true);
+  m_doseListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+  m_doseListWidget->setSizePolicy(QSizePolicy::Preferred,
+                                  QSizePolicy::Expanding);
+  connect(m_doseListWidget, &QListWidget::customContextMenuRequested, this,
+          &DicomViewer::onDoseListContextMenu);
+  doseMgrLayout->addWidget(m_doseListWidget, 1);
+  m_gammaAnalysisButton = new QPushButton(tr("Gamma Analysis"));
+  doseMgrLayout->addWidget(m_gammaAnalysisButton);
+  // Add Random Study button under the DoseList
+  m_randomStudyButton = new QPushButton(tr("Random Study"));
+  doseMgrLayout->addWidget(m_randomStudyButton);
+
+  // Brachy パネル（右側タブ）
+  m_brachyPanel = new QWidget(this);
+  QVBoxLayout *brachyLayout = new QVBoxLayout(m_brachyPanel);
+  brachyLayout->setContentsMargins(0, 0, 0, 0);
+
+  // Load RT-Plan button
+  m_brachyReadButton = new QPushButton(tr("Load RT-Plan"), m_brachyPanel);
+  brachyLayout->addWidget(m_brachyReadButton);
+
+  // Source list
+  m_brachyListWidget = new QListWidget(m_brachyPanel);
+  brachyLayout->addWidget(m_brachyListWidget);
+
+  // Load Ir source data button
+  m_brachyLoadDataButton = new QPushButton(tr("Load Ir Source Data"), m_brachyPanel);
+  brachyLayout->addWidget(m_brachyLoadDataButton);
+
+  // Data status label with improved formatting
+  m_brachyDataStatus = new QLabel(tr("Status: No source data loaded"), m_brachyPanel);
+  m_brachyDataStatus->setWordWrap(true);
+  m_brachyDataStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  setBrachyStatusStyle(m_brachyStatusBorderColor);
+  QObject::connect(&theme, &ThemeManager::textColorChanged, m_brachyDataStatus,
+                   [this](const QColor &) {
+                     setBrachyStatusStyle(m_brachyStatusBorderColor);
+                   });
+  brachyLayout->addWidget(m_brachyDataStatus);
+
+  // Voxel size setting
+  QHBoxLayout *voxelLayout = new QHBoxLayout();
+  voxelLayout->addWidget(new QLabel(tr("Voxel Size (mm):"), m_brachyPanel));
+  m_brachyVoxelSizeSpinBox = new QDoubleSpinBox(m_brachyPanel);
+  m_brachyVoxelSizeSpinBox->setRange(0.5, 10.0);
+  m_brachyVoxelSizeSpinBox->setSingleStep(0.5);
+  m_brachyVoxelSizeSpinBox->setValue(2.0);
+  m_brachyVoxelSizeSpinBox->setDecimals(1);
+  voxelLayout->addWidget(m_brachyVoxelSizeSpinBox);
+  brachyLayout->addLayout(voxelLayout);
+
+  // Calculate dose button
+  m_brachyCalcDoseButton = new QPushButton(tr("Calculate Dose"), m_brachyPanel);
+  m_brachyCalcDoseButton->setEnabled(false);
+  brachyLayout->addWidget(m_brachyCalcDoseButton);
+
+  // Random source generation button
+  m_brachyRandomSourceButton = new QPushButton(tr("Generate Random Sources (Test)"), m_brachyPanel);
+  brachyLayout->addWidget(m_brachyRandomSourceButton);
+
+  // Test source at origin button
+  m_brachyTestSourceButton = new QPushButton(tr("Generate Test Source at Origin"), m_brachyPanel);
+  brachyLayout->addWidget(m_brachyTestSourceButton);
+
+  // Progress bar
+  m_brachyProgressBar = new QProgressBar(m_brachyPanel);
+  m_brachyProgressBar->setVisible(false);
+  brachyLayout->addWidget(m_brachyProgressBar);
+
+  // Dose Optimization Section
+  brachyLayout->addWidget(new QLabel(tr("<b>Dose Optimization</b>"), m_brachyPanel));
+
+  // Add evaluation point button
+  m_brachyAddEvalPointButton = new QPushButton(tr("Add Dose Point at Cursor"), m_brachyPanel);
+  m_brachyAddEvalPointButton->setEnabled(false);
+  brachyLayout->addWidget(m_brachyAddEvalPointButton);
+
+  // Evaluation points list
+  m_brachyEvalPointsList = new QListWidget(m_brachyPanel);
+  m_brachyEvalPointsList->setMaximumHeight(100);
+  brachyLayout->addWidget(m_brachyEvalPointsList);
+
+  // Clear evaluation points button
+  m_brachyClearEvalPointsButton = new QPushButton(tr("Clear Dose Points"), m_brachyPanel);
+  brachyLayout->addWidget(m_brachyClearEvalPointsButton);
+
+  // Optimization settings
+  QHBoxLayout *iterLayout = new QHBoxLayout();
+  iterLayout->addWidget(new QLabel(tr("Max Iterations:"), m_brachyPanel));
+  m_brachyOptimizationIterations = new QSpinBox(m_brachyPanel);
+  m_brachyOptimizationIterations->setRange(10, 1000);
+  m_brachyOptimizationIterations->setValue(100);
+  m_brachyOptimizationIterations->setSingleStep(10);
+  iterLayout->addWidget(m_brachyOptimizationIterations);
+  brachyLayout->addLayout(iterLayout);
+
+  QHBoxLayout *tolLayout = new QHBoxLayout();
+  tolLayout->addWidget(new QLabel(tr("Tolerance:"), m_brachyPanel));
+  m_brachyOptimizationTolerance = new QDoubleSpinBox(m_brachyPanel);
+  m_brachyOptimizationTolerance->setRange(1e-6, 1e-2);
+  m_brachyOptimizationTolerance->setValue(1e-4);
+  m_brachyOptimizationTolerance->setDecimals(6);
+  m_brachyOptimizationTolerance->setSingleStep(1e-5);
+  tolLayout->addWidget(m_brachyOptimizationTolerance);
+  brachyLayout->addLayout(tolLayout);
+
+  // Optimize button
+  m_brachyOptimizeButton = new QPushButton(tr("Optimize Dwell Times"), m_brachyPanel);
+  m_brachyOptimizeButton->setEnabled(false);
+  brachyLayout->addWidget(m_brachyOptimizeButton);
+
+  // Reference Points Section
+  brachyLayout->addWidget(new QLabel(tr("<b>Reference Points (from Plan)</b>"), m_brachyPanel));
+
+  // Reference points list
+  m_brachyRefPointsList = new QListWidget(m_brachyPanel);
+  m_brachyRefPointsList->setMaximumHeight(80);
+  brachyLayout->addWidget(m_brachyRefPointsList);
+
+  // Show reference points checkbox
+  m_brachyShowRefPointsCheck = new QCheckBox(tr("Show on Visualization"), m_brachyPanel);
+  m_brachyShowRefPointsCheck->setChecked(true);
+  brachyLayout->addWidget(m_brachyShowRefPointsCheck);
+
+  brachyLayout->addStretch();
+
+  // CyberKnife パネル（右側タブ）
+  m_cyberknifePanel = new QWidget(this);
+  QVBoxLayout *cyberLayout = new QVBoxLayout(m_cyberknifePanel);
+  cyberLayout->setContentsMargins(0, 0, 0, 0);
+  m_cyberknifeLoadButton =
+      new QPushButton(tr("Load CyberKnife XML"), m_cyberknifePanel);
+  cyberLayout->addWidget(m_cyberknifeLoadButton);
+  m_cyberknifeTextBox = new QPlainTextEdit(m_cyberknifePanel);
+  m_cyberknifeTextBox->setReadOnly(true);
+  m_cyberknifeTextBox->setPlaceholderText(
+      tr("CyberKnife beam information will appear here."));
+  m_cyberknifeTextBox->setSizePolicy(QSizePolicy::Preferred,
+                                     QSizePolicy::Expanding);
+  cyberLayout->addWidget(m_cyberknifeTextBox, 1);
+
+  m_cyberknifeOcrTextBox = new QPlainTextEdit(m_cyberknifePanel);
+  m_cyberknifeOcrTextBox->setReadOnly(true);
+  m_cyberknifeOcrTextBox->setPlaceholderText(
+      tr("OCR table assignments will appear here."));
+  m_cyberknifeOcrTextBox->setSizePolicy(QSizePolicy::Preferred,
+                                        QSizePolicy::MinimumExpanding);
+  m_cyberknifeOcrTextBox->setMaximumBlockCount(256);
+  cyberLayout->addWidget(m_cyberknifeOcrTextBox);
+
+  QLabel *densityLabel = new QLabel(tr("Density Model"), m_cyberknifePanel);
+  theme.applyTextColor(
+      densityLabel,
+      QStringLiteral("font-weight: bold; color: %1;"));
+  cyberLayout->addWidget(densityLabel);
+
+  m_cyberknifeDensityTextBox =
+      new QPlainTextEdit(m_cyberknifePanel);
+  m_cyberknifeDensityTextBox->setReadOnly(true);
+  m_cyberknifeDensityTextBox->setPlaceholderText(
+      tr("Density model data will appear here."));
+  m_cyberknifeDensityTextBox->setSizePolicy(QSizePolicy::Preferred,
+                                            QSizePolicy::MinimumExpanding);
+  m_cyberknifeDensityTextBox->setMaximumBlockCount(512);
+  cyberLayout->addWidget(m_cyberknifeDensityTextBox);
+
+  QHBoxLayout *modelLayout = new QHBoxLayout();
+  QLabel *modelLabel = new QLabel(tr("Dose Model"), m_cyberknifePanel);
+  modelLayout->addWidget(modelLabel);
+  m_cyberknifeModelCombo = new QComboBox(m_cyberknifePanel);
+  using CyberKnifeModel = CyberKnife::CyberKnifeDoseCalculator::DoseModel;
+  m_cyberknifeModelCombo->addItem(
+      tr("Standard (with scatter)"),
+      QVariant::fromValue(static_cast<int>(CyberKnifeModel::PrimaryPlusScatter)));
+  m_cyberknifeModelCombo->addItem(
+      tr("Primary only"),
+      QVariant::fromValue(static_cast<int>(CyberKnifeModel::PrimaryOnly)));
+  m_cyberknifeModelCombo->addItem(
+      tr("Ray-tracing (simple)"),
+      QVariant::fromValue(static_cast<int>(CyberKnifeModel::RayTracing)));
+  m_cyberknifeModelCombo->setCurrentIndex(2);  // Default: RayTracing
+  modelLayout->addWidget(m_cyberknifeModelCombo, 1);
+  modelLayout->addStretch(1);
+  cyberLayout->addLayout(modelLayout);
+
+  QHBoxLayout *xyStepLayout = new QHBoxLayout();
+  xyStepLayout->addWidget(new QLabel(tr("XY Step"), m_cyberknifePanel));
+  m_cyberknifeStepXYCombo = new QComboBox(m_cyberknifePanel);
+  for (int step = 1; step <= 4; ++step) {
+    m_cyberknifeStepXYCombo->addItem(tr("Step %1").arg(step), step);
+  }
+  m_cyberknifeStepXYCombo->setCurrentIndex(0);
+  xyStepLayout->addWidget(m_cyberknifeStepXYCombo, 1);
+  xyStepLayout->addStretch(1);
+  cyberLayout->addLayout(xyStepLayout);
+
+  QHBoxLayout *zStepLayout = new QHBoxLayout();
+  zStepLayout->addWidget(new QLabel(tr("Z Step"), m_cyberknifePanel));
+  m_cyberknifeStepZCombo = new QComboBox(m_cyberknifePanel);
+  for (int step = 1; step <= 4; ++step) {
+    m_cyberknifeStepZCombo->addItem(tr("Step %1").arg(step), step);
+  }
+  m_cyberknifeStepZCombo->setCurrentIndex(0);
+  zStepLayout->addWidget(m_cyberknifeStepZCombo, 1);
+  zStepLayout->addStretch(1);
+  cyberLayout->addLayout(zStepLayout);
+
+  // Dynamic Grid Size Mode checkbox
+  m_cyberknifeDynamicGridCheckBox = new QCheckBox(tr("Dynamic Grid Size Mode"), m_cyberknifePanel);
+  m_cyberknifeDynamicGridCheckBox->setToolTip(
+      tr("Adaptively refine high-dose regions:\n"
+         "Step 4 (coarse) → Step 2 (≥threshold2% max) → Step 1 (≥threshold1% max)"));
+  m_cyberknifeDynamicGridCheckBox->setChecked(true);  // Default: enabled
+  cyberLayout->addWidget(m_cyberknifeDynamicGridCheckBox);
+
+  // Dynamic Grid threshold settings
+  QHBoxLayout *threshold2Layout = new QHBoxLayout();
+  threshold2Layout->addWidget(new QLabel(tr("Step 2 Threshold (%)"), m_cyberknifePanel));
+  m_cyberknifeDynamicThresholdStep2SpinBox = new QDoubleSpinBox(m_cyberknifePanel);
+  m_cyberknifeDynamicThresholdStep2SpinBox->setRange(0.0, 100.0);
+  m_cyberknifeDynamicThresholdStep2SpinBox->setSingleStep(5.0);
+  m_cyberknifeDynamicThresholdStep2SpinBox->setValue(50.0);  // Default: 50%
+  m_cyberknifeDynamicThresholdStep2SpinBox->setSuffix("%");
+  m_cyberknifeDynamicThresholdStep2SpinBox->setToolTip(
+      tr("Refine regions with dose ≥ this percentage of max dose using Step 2"));
+  threshold2Layout->addWidget(m_cyberknifeDynamicThresholdStep2SpinBox, 1);
+  threshold2Layout->addStretch(1);
+  cyberLayout->addLayout(threshold2Layout);
+
+  QHBoxLayout *threshold1Layout = new QHBoxLayout();
+  threshold1Layout->addWidget(new QLabel(tr("Step 1 Threshold (%)"), m_cyberknifePanel));
+  m_cyberknifeDynamicThresholdStep1SpinBox = new QDoubleSpinBox(m_cyberknifePanel);
+  m_cyberknifeDynamicThresholdStep1SpinBox->setRange(0.0, 100.0);
+  m_cyberknifeDynamicThresholdStep1SpinBox->setSingleStep(5.0);
+  m_cyberknifeDynamicThresholdStep1SpinBox->setValue(70.0);  // Default: 70%
+  m_cyberknifeDynamicThresholdStep1SpinBox->setSuffix("%");
+  m_cyberknifeDynamicThresholdStep1SpinBox->setToolTip(
+      tr("Refine regions with dose ≥ this percentage of max dose using Step 1 (highest resolution)"));
+  threshold1Layout->addWidget(m_cyberknifeDynamicThresholdStep1SpinBox, 1);
+  threshold1Layout->addStretch(1);
+  cyberLayout->addLayout(threshold1Layout);
+
+  // Dose calculation buttons
+  QHBoxLayout *calcButtonLayout = new QHBoxLayout();
+  m_cyberknifeDoseCalcButton =
+      new QPushButton(tr("DoseCalc"), m_cyberknifePanel);
+  m_cyberknifeDoseCalcButton->setEnabled(false);
+  calcButtonLayout->addWidget(m_cyberknifeDoseCalcButton);
+
+  m_cyberknifeCancelButton =
+      new QPushButton(tr("Cancel"), m_cyberknifePanel);
+  m_cyberknifeCancelButton->setEnabled(false);
+  m_cyberknifeCancelButton->setVisible(true);  // Always visible
+  calcButtonLayout->addWidget(m_cyberknifeCancelButton);
+  calcButtonLayout->addStretch(1);
+  cyberLayout->addLayout(calcButtonLayout);
+
+  m_cyberknifeProgressBar = new QProgressBar(m_cyberknifePanel);
+  m_cyberknifeProgressBar->setRange(0, 100);
+  m_cyberknifeProgressBar->setValue(0);
+  m_cyberknifeProgressBar->setVisible(true);  // Always visible
+  cyberLayout->addWidget(m_cyberknifeProgressBar);
+
+  // Status label for Dynamic Grid Mode
+  m_cyberknifeStatusLabel = new QLabel(m_cyberknifePanel);
+  m_cyberknifeStatusLabel->setAlignment(Qt::AlignCenter);
+  theme.applyTextColor(
+      m_cyberknifeStatusLabel,
+      QStringLiteral("QLabel { color: %1; font-weight: bold; }"));
+  m_cyberknifeStatusLabel->setVisible(false);
+  cyberLayout->addWidget(m_cyberknifeStatusLabel);
+
+#ifdef ENABLE_GPU_DOSE_CALCULATION
+  // GPU acceleration controls
+  m_cyberknifeGpuEnableCheckBox = new QCheckBox(tr("Enable GPU Acceleration"), m_cyberknifePanel);
+  m_cyberknifeGpuEnableCheckBox->setToolTip(
+      tr("Use GPU for dose calculation (OpenCL/Metal/CUDA)\n"
+         "Provides 10-100x speedup for large calculations"));
+  m_cyberknifeGpuEnableCheckBox->setChecked(false);
+  cyberLayout->addWidget(m_cyberknifeGpuEnableCheckBox);
+
+  m_cyberknifeGpuStatusLabel = new QLabel(m_cyberknifePanel);
+  m_cyberknifeGpuStatusLabel->setWordWrap(true);
+  theme.applyTextColor(
+      m_cyberknifeGpuStatusLabel,
+      QStringLiteral("QLabel { color: %1; font-style: italic; padding: 2px; }"));
+  cyberLayout->addWidget(m_cyberknifeGpuStatusLabel);
+
+  connect(m_cyberknifeGpuEnableCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
+    if (m_cyberKnifeDoseCalculator) {
+      m_cyberKnifeDoseCalculator->setGPUEnabled(checked);
+      refreshCyberKnifeCalculatorState();
+    }
+  });
+#endif
+
+  cyberLayout->addStretch(1);
+  connect(m_cyberknifeLoadButton, &QPushButton::clicked, this,
+          &DicomViewer::onLoadCyberKnifeXml);
+  connect(m_cyberknifeStepXYCombo,
+          qOverload<int>(&QComboBox::currentIndexChanged), this,
+          [this](int) { applyCyberKnifeResolutionSettings(); });
+  connect(m_cyberknifeStepZCombo,
+          qOverload<int>(&QComboBox::currentIndexChanged), this,
+          [this](int) { applyCyberKnifeResolutionSettings(); });
+  connect(m_cyberknifeDynamicGridCheckBox, &QCheckBox::stateChanged, this,
+          [this](int) {
+            applyCyberKnifeResolutionSettings();
+            updateCyberKnifeUiState();  // Update spinbox enabled state
+          });
+  connect(m_cyberknifeDynamicThresholdStep2SpinBox,
+          qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+          [this](double) { applyCyberKnifeResolutionSettings(); });
+  connect(m_cyberknifeDynamicThresholdStep1SpinBox,
+          qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+          [this](double) { applyCyberKnifeResolutionSettings(); });
+  connect(m_cyberknifeModelCombo,
+          qOverload<int>(&QComboBox::currentIndexChanged), this,
+          [this](int) { applyCyberKnifeDoseModel(); });
+  connect(m_cyberknifeDoseCalcButton, &QPushButton::clicked, this,
+          &DicomViewer::onCyberKnifeDoseCalcClicked);
+  connect(m_cyberknifeCancelButton, &QPushButton::clicked, this,
+          &DicomViewer::onCyberKnifeCancelClicked);
+
+  applyCyberKnifeResolutionSettings();
+  applyCyberKnifeDoseModel();
+
+  // AIセグメンテーションパネル（右側タブ）
+  m_aiSegPanel = new QWidget(this);
+  QVBoxLayout *aiSegLayout = new QVBoxLayout(m_aiSegPanel);
+  aiSegLayout->setContentsMargins(0, 0, 0, 0);
+  QLabel *aiSegTitle = new QLabel(tr("AI Segmentation"), m_aiSegPanel);
+  theme.applyTextColor(
+      aiSegTitle,
+      QStringLiteral("font-weight: bold; color: %1;"));
+  aiSegLayout->addWidget(aiSegTitle);
+#ifdef USE_ONNXRUNTIME
+  m_loadSegModelButton = new QPushButton(tr("Load ONNX Model"));
+  m_runSegButton = new QPushButton(tr("Run Segmentation"));
+  m_runSegButton->setEnabled(false);
+  m_showSegCheck = new QCheckBox(tr("Show Segmentation"));
+  m_showSegCheck->setChecked(true);
+  m_loadedModelLabel = new QLabel(tr("No model loaded"));
+  aiSegLayout->addWidget(m_loadSegModelButton);
+  aiSegLayout->addWidget(m_loadedModelLabel);
+
+  // 品質モード選択を追加
+  QLabel *qualityLabel = new QLabel(tr("Quality Mode:"), m_aiSegPanel);
+  aiSegLayout->addWidget(qualityLabel);
+  m_segQualityModeCombo = new QComboBox(m_aiSegPanel);
+  m_segQualityModeCombo->addItem(tr("Standard (Fast)"), "standard");
+  m_segQualityModeCombo->addItem(tr("High (TTA)"), "high");
+  m_segQualityModeCombo->addItem(tr("Ultra (TTA+SW)"), "ultra");
+  m_segQualityModeCombo->setCurrentIndex(1); // デフォルトはHigh
+  m_segQualityModeCombo->setToolTip(
+    tr("Standard: Fastest, basic accuracy\n"
+       "High: TTA (Test Time Augmentation) for better accuracy, ~4x processing time\n"
+       "Ultra: TTA + Sliding Window for maximum accuracy, ~10-20x processing time"));
+  aiSegLayout->addWidget(m_segQualityModeCombo);
+
+  aiSegLayout->addWidget(m_runSegButton);
+  aiSegLayout->addWidget(m_showSegCheck);
+
+  // Structure選択用のUIを追加
+  QLabel *structureLabel = new QLabel(tr("RTSS Structure:"), m_aiSegPanel);
+  aiSegLayout->addWidget(structureLabel);
+  m_structureComboBox = new QComboBox(m_aiSegPanel);
+  m_structureComboBox->addItem(tr("None (Full volume)"));
+  aiSegLayout->addWidget(m_structureComboBox);
+
+  // バウンディングボックス表示用のグリッドレイアウト
+  QGroupBox *bboxGroup = new QGroupBox(tr("Bounding Box (mm)"), m_aiSegPanel);
+  QGridLayout *bboxLayout = new QGridLayout(bboxGroup);
+
+  bboxLayout->addWidget(new QLabel(tr("Min")), 0, 1);
+  bboxLayout->addWidget(new QLabel(tr("Max")), 0, 2);
+
+  bboxLayout->addWidget(new QLabel(tr("X:")), 1, 0);
+  m_bboxXMinEdit = new QLineEdit(m_aiSegPanel);
+  m_bboxXMinEdit->setReadOnly(true);
+  bboxLayout->addWidget(m_bboxXMinEdit, 1, 1);
+  m_bboxXMaxEdit = new QLineEdit(m_aiSegPanel);
+  m_bboxXMaxEdit->setReadOnly(true);
+  bboxLayout->addWidget(m_bboxXMaxEdit, 1, 2);
+
+  bboxLayout->addWidget(new QLabel(tr("Y:")), 2, 0);
+  m_bboxYMinEdit = new QLineEdit(m_aiSegPanel);
+  m_bboxYMinEdit->setReadOnly(true);
+  bboxLayout->addWidget(m_bboxYMinEdit, 2, 1);
+  m_bboxYMaxEdit = new QLineEdit(m_aiSegPanel);
+  m_bboxYMaxEdit->setReadOnly(true);
+  bboxLayout->addWidget(m_bboxYMaxEdit, 2, 2);
+
+  bboxLayout->addWidget(new QLabel(tr("Z:")), 3, 0);
+  m_bboxZMinEdit = new QLineEdit(m_aiSegPanel);
+  m_bboxZMinEdit->setReadOnly(true);
+  bboxLayout->addWidget(m_bboxZMinEdit, 3, 1);
+  m_bboxZMaxEdit = new QLineEdit(m_aiSegPanel);
+  m_bboxZMaxEdit->setReadOnly(true);
+  bboxLayout->addWidget(m_bboxZMaxEdit, 3, 2);
+
+  aiSegLayout->addWidget(bboxGroup);
+
+  m_segLabelList = new QListWidget();
+  m_segLabelList->setEnabled(false);
+  aiSegLayout->addWidget(m_segLabelList);
+  aiSegLayout->addStretch();
+  connect(m_loadSegModelButton, &QPushButton::clicked, this,
+          &DicomViewer::onLoadSegmentationModel);
+  connect(m_runSegButton, &QPushButton::clicked, this,
+          &DicomViewer::onRunSegmentation);
+  connect(m_showSegCheck, &QCheckBox::toggled, this, [this](bool checked) {
+    m_segmentationVisible = checked;
+    updateImage();
+  });
+  connect(m_segLabelList, &QListWidget::itemChanged, this,
+          &DicomViewer::onSegmentationLabelToggled);
+  connect(m_structureComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+          &DicomViewer::onStructureSelectionChanged);
+#else
+  aiSegLayout->addWidget(
+      new QLabel(tr("ONNX Runtime not found.\nSegmentation disabled")));
+  aiSegLayout->addStretch();
+#endif
+
+  // AI制御パネル（右側タブ）
+  m_aiControlPanel = new QWidget(this);
+  QVBoxLayout *aiControlLayout = new QVBoxLayout(m_aiControlPanel);
+  aiControlLayout->setContentsMargins(0, 0, 0, 0);
+  QLabel *aiControlTitle = new QLabel(tr("Local LLM Control (LMStudio)"),
+                                      m_aiControlPanel);
+  theme.applyTextColor(
+      aiControlTitle,
+      QStringLiteral("font-weight: bold; color: %1;"));
+  aiControlLayout->addWidget(aiControlTitle);
+
+  QFormLayout *aiSettingsForm = new QFormLayout();
+  aiSettingsForm->setContentsMargins(0, 0, 0, 0);
+  aiSettingsForm->setSpacing(6);
+  m_aiEndpointEdit = new QLineEdit(m_aiControlPanel);
+  m_aiEndpointEdit->setPlaceholderText(
+      tr("http://localhost:1234/v1/chat/completions"));
+  aiSettingsForm->addRow(tr("エンドポイント"), m_aiEndpointEdit);
+  m_aiModelCombo = new QComboBox(m_aiControlPanel);
+  m_aiModelCombo->setInsertPolicy(QComboBox::NoInsert);
+  m_aiModelCombo->addItem(tr("取得中..."));
+  m_aiModelCombo->setCurrentIndex(0);
+  m_aiModelCombo->setEnabled(false);
+  aiSettingsForm->addRow(tr("モデル"), m_aiModelCombo);
+  aiControlLayout->addLayout(aiSettingsForm);
+
+  QLabel *systemPromptLabel = new QLabel(tr("システムプロンプト"),
+                                         m_aiControlPanel);
+  m_aiSystemPromptEdit = new QPlainTextEdit(m_aiControlPanel);
+  m_aiSystemPromptEdit->setPlaceholderText(
+      tr("JSONコマンドのみを生成する指示を記載してください。"));
+  m_aiSystemPromptEdit->setMaximumHeight(140);
+  aiControlLayout->addWidget(systemPromptLabel);
+  aiControlLayout->addWidget(m_aiSystemPromptEdit);
+
+  QLabel *promptLabel = new QLabel(tr("ユーザープロンプト"), m_aiControlPanel);
+  m_aiPromptEdit = new QPlainTextEdit(m_aiControlPanel);
+  m_aiPromptEdit->setPlaceholderText(tr("ShioRIS3で実行したい操作内容を入力"));
+  m_aiPromptEdit->setMinimumHeight(80);
+  aiControlLayout->addWidget(promptLabel);
+  aiControlLayout->addWidget(m_aiPromptEdit);
+
+  QHBoxLayout *aiButtonRow = new QHBoxLayout();
+  m_aiSendButton = new QPushButton(tr("送信"), m_aiControlPanel);
+  m_aiExecuteButton = new QPushButton(tr("コマンド実行"), m_aiControlPanel);
+  m_aiExecuteButton->setEnabled(false);
+  m_aiVoiceRecordButton = new QPushButton(tr("🎤 音声入力"), m_aiControlPanel);
+  m_aiVoiceRecordButton->setEnabled(false);  // Will be enabled when Whisper model is loaded
+  aiButtonRow->addWidget(m_aiSendButton);
+  aiButtonRow->addWidget(m_aiExecuteButton);
+  aiButtonRow->addWidget(m_aiVoiceRecordButton);
+  aiButtonRow->addStretch(1);
+  aiControlLayout->addLayout(aiButtonRow);
+
+  m_aiAutoExecuteCheck =
+      new QCheckBox(tr("応答受信時に自動実行"), m_aiControlPanel);
+  m_aiAutoExecuteCheck->setChecked(true);
+  aiControlLayout->addWidget(m_aiAutoExecuteCheck);
+
+  m_aiStatusLabel = new QLabel(tr("待機中"), m_aiControlPanel);
+  aiControlLayout->addWidget(m_aiStatusLabel);
+
+  QLabel *commandListLabel =
+      new QLabel(tr("コマンドステップ"), m_aiControlPanel);
+  aiControlLayout->addWidget(commandListLabel);
+
+  m_aiCommandList = new QTreeWidget(m_aiControlPanel);
+  m_aiCommandList->setColumnCount(2);
+  m_aiCommandList->setHeaderLabels(
+      {tr("コマンド"), tr("状態")});
+  m_aiCommandList->setRootIsDecorated(false);
+  m_aiCommandList->setAlternatingRowColors(true);
+  m_aiCommandList->setSelectionMode(QAbstractItemView::NoSelection);
+  m_aiCommandList->setFocusPolicy(Qt::NoFocus);
+  m_aiCommandList->setMinimumHeight(120);
+  m_aiCommandList->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+  m_aiCommandList->header()->setSectionResizeMode(1,
+                                                 QHeaderView::ResizeToContents);
+  aiControlLayout->addWidget(m_aiCommandList);
+
+  QLabel *macroLabel = new QLabel(tr("マクロ"), m_aiControlPanel);
+  aiControlLayout->addWidget(macroLabel);
+
+  QHBoxLayout *macroLayout = new QHBoxLayout();
+  m_aiMacroCombo = new QComboBox(m_aiControlPanel);
+  m_aiMacroCombo->setSizePolicy(QSizePolicy::Expanding,
+                                QSizePolicy::Preferred);
+  macroLayout->addWidget(m_aiMacroCombo, 1);
+  m_aiMacroRunButton = new QPushButton(tr("実行"), m_aiControlPanel);
+  macroLayout->addWidget(m_aiMacroRunButton);
+  m_aiMacroSaveButton = new QPushButton(tr("保存"), m_aiControlPanel);
+  macroLayout->addWidget(m_aiMacroSaveButton);
+  m_aiMacroDeleteButton = new QPushButton(tr("削除"), m_aiControlPanel);
+  macroLayout->addWidget(m_aiMacroDeleteButton);
+  m_aiMacroExportButton = new QPushButton(tr("書出"), m_aiControlPanel);
+  macroLayout->addWidget(m_aiMacroExportButton);
+  m_aiMacroImportButton = new QPushButton(tr("読込"), m_aiControlPanel);
+  macroLayout->addWidget(m_aiMacroImportButton);
+  m_aiMacroRunButton->setEnabled(false);
+  m_aiMacroDeleteButton->setEnabled(false);
+  m_aiMacroExportButton->setEnabled(false);
+  aiControlLayout->addLayout(macroLayout);
+
+  m_aiLogView = new QPlainTextEdit(m_aiControlPanel);
+  m_aiLogView->setReadOnly(true);
+  m_aiLogView->setPlaceholderText(tr("LLMとのやり取りがここに表示されます。"));
+  m_aiLogView->setMinimumHeight(140);
+  aiControlLayout->addWidget(m_aiLogView, 1);
+
+  connect(m_aiSendButton, &QPushButton::clicked, this,
+          &DicomViewer::onAiSendPrompt);
+  connect(m_aiExecuteButton, &QPushButton::clicked, this,
+          &DicomViewer::onAiExecutePendingCommands);
+  connect(m_aiVoiceRecordButton, &QPushButton::clicked, this,
+          &DicomViewer::onAiVoiceRecordButtonClicked);
+  connect(m_aiMacroSaveButton, &QPushButton::clicked, this,
+          &DicomViewer::onAiMacroSaveRequested);
+  connect(m_aiMacroDeleteButton, &QPushButton::clicked, this,
+          &DicomViewer::onAiMacroDeleteRequested);
+  connect(m_aiMacroRunButton, &QPushButton::clicked, this,
+          &DicomViewer::onAiMacroRunRequested);
+  connect(m_aiMacroExportButton, &QPushButton::clicked, this,
+          &DicomViewer::onAiMacroExportRequested);
+  connect(m_aiMacroImportButton, &QPushButton::clicked, this,
+          &DicomViewer::onAiMacroImportRequested);
+  connect(m_aiAutoExecuteCheck, &QCheckBox::toggled, this,
+          &DicomViewer::onAiAutoExecuteToggled);
+  connect(m_aiEndpointEdit, &QLineEdit::editingFinished, this,
+          &DicomViewer::onAiEndpointEditingFinished);
+  connect(m_aiModelCombo, &QComboBox::currentIndexChanged, this,
+          &DicomViewer::onAiModelChanged);
+  connect(m_aiSystemPromptEdit, &QPlainTextEdit::textChanged, this,
+          [this]() { saveAiSettings(); });
+
+  // QRコードパネル（右側タブ）
+  m_qrPanel = new QWidget(this);
+  QVBoxLayout *qrLayout = new QVBoxLayout(m_qrPanel);
+  qrLayout->setContentsMargins(0, 0, 0, 0);
+  qrLayout->addWidget(new QLabel(tr("QR Generator")));
+  m_qrTextEdit = new QPlainTextEdit(m_qrPanel);
+  m_qrTextEdit->setPlaceholderText(
+      tr("Enter text to encode (supports newlines)"));
+  m_qrTextEdit->setMinimumHeight(80);
+  qrLayout->addWidget(m_qrTextEdit);
+  // Optional escaping for WiFi/MECARD reserved characters
+  // Show a literal backslash before parenthesis: "\ (WiFi/MECARD)"
+  m_qrEscapeCheck =
+      new QCheckBox(tr("Escape ; , : \\ (WiFi/MECARD)"), m_qrPanel);
+  m_qrEscapeCheck->setToolTip(
+      tr("Adds backslashes before ; , : and \\ if not already escaped. Useful "
+         "for iPhone parsing of WiFi/MECARD strings."));
+  qrLayout->addWidget(m_qrEscapeCheck);
+  m_qrUtf8EciCheck = new QCheckBox(tr("Add UTF-8 ECI"), m_qrPanel);
+  m_qrUtf8EciCheck->setToolTip(
+      tr("Prepend UTF-8 ECI segment for cross-device decoding. Some decoders "
+         "(OpenCV) may fail with ECI."));
+  m_qrUtf8EciCheck->setChecked(false);
+  qrLayout->addWidget(m_qrUtf8EciCheck);
+  m_qrHighAccuracyCheck =
+      new QCheckBox(tr("High accuracy (slower)"), m_qrPanel);
+  m_qrHighAccuracyCheck->setToolTip(tr("Use multi-variant robust decoding. "
+                                       "Uncheck for faster camera scanning."));
+  m_qrHighAccuracyCheck->setChecked(false);
+  qrLayout->addWidget(m_qrHighAccuracyCheck);
+  m_qrGenerateButton = new QPushButton(tr("Generate"), m_qrPanel);
+  m_qrDecodeImageButton = new QPushButton(tr("Decode Image"), m_qrPanel);
+  m_qrSaveButton = new QPushButton(tr("Save"), m_qrPanel);
+  m_qrClearButton = new QPushButton(tr("Clear"), m_qrPanel);
+  {
+    // Arrange buttons in 2 columns
+    QGridLayout *grid = new QGridLayout();
+    grid->setHorizontalSpacing(8);
+    grid->setVerticalSpacing(6);
+    grid->addWidget(m_qrGenerateButton, 0, 0);
+    grid->addWidget(m_qrDecodeImageButton, 0, 1);
+    grid->addWidget(m_qrSaveButton, 1, 0);
+    grid->addWidget(m_qrClearButton, 1, 1);
+    qrLayout->addLayout(grid);
+  }
+  m_qrImageLabel = new QLabel(m_qrPanel);
+  m_qrImageLabel->setAlignment(Qt::AlignCenter);
+  m_qrImageLabel->setMinimumSize(240, 240);
+  m_qrImageLabel->setScaledContents(false); // avoid smooth scaling
+  m_qrImageLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+  qrLayout->addWidget(m_qrImageLabel, 1);
+
+  // Camera controls row
+  {
+    QHBoxLayout *row = new QHBoxLayout();
+    m_qrStartCamButton = new QPushButton(tr("Start Camera"), m_qrPanel);
+    m_qrStopCamButton = new QPushButton(tr("Stop"), m_qrPanel);
+    m_qrStopCamButton->setEnabled(false);
+    row->addWidget(m_qrStartCamButton);
+    row->addWidget(m_qrStopCamButton);
+    row->addStretch();
+    qrLayout->addLayout(row);
+  }
+
+  // Timer for camera grabbing
+  m_qrCamTimer = new QTimer(this);
+  m_qrCamTimer->setInterval(33); // ~30 FPS
+  m_qrTimer.start();
+
+  m_rightTabWidget = new MultiRowTabWidget(this);
+  m_rightTabWidget->setFixedWidth(300);
+  m_rightTabWidget->addTab(m_doseManagerPanel, tr("DoseManager"));
+  m_rightTabWidget->addTab(m_brachyPanel, tr("Brachy"));
+  m_rightTabWidget->addTab(m_cyberknifePanel, tr("CyberKnife"));
+  m_rightTabWidget->addTab(m_aiSegPanel, tr("AI Seg"));
+  m_rightTabWidget->addTab(m_aiControlPanel, tr("AI"));
+  m_rightTabWidget->addTab(m_qrPanel, tr("QR"));
+
+  if (m_showControls) {
+    mainSplitter->addWidget(controlPanel); // 左側
+  }
+  mainSplitter->addWidget(m_imageContainer); // 中央
+  mainSplitter->addWidget(m_rightTabWidget); // 右側
+
+  if (m_showControls) {
+    mainSplitter->setSizes({300, 700, 300});
+  } else {
+    mainSplitter->setSizes({700, 300});
+  }
+
+  m_mainLayout->addWidget(mainSplitter);
+  updateViewLayout();
+
+  // シグナル・スロット接続（既存部分は省略...同じ）
+  connect(m_windowSlider, &QSlider::valueChanged, this,
+          &DicomViewer::onWindowChanged);
+  connect(m_levelSlider, &QSlider::valueChanged, this,
+          &DicomViewer::onLevelChanged);
+  connect(m_windowSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+          m_windowSlider, &QSlider::setValue);
+  connect(m_levelSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+          m_levelSlider, &QSlider::setValue);
+
+  connect(m_resetZoomButton, &QPushButton::clicked, this,
+          &DicomViewer::onResetZoom);
+  connect(m_fitToWindowButton, &QPushButton::clicked, this,
+          &DicomViewer::onFitToWindow);
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    connect(m_sliceSliders[i], &QSlider::valueChanged, this,
+            &DicomViewer::onImageSliderChanged);
+    connect(m_sliceSliders[i], &QSlider::sliderPressed, this,
+            [this, i]() { m_activeViewIndex = i; });
+  }
+
+  connect(m_windowLevelButton, &QPushButton::clicked, this,
+          &DicomViewer::onWindowLevelButtonClicked);
+  connect(m_panButton, &QPushButton::toggled, this,
+          &DicomViewer::onPanModeToggled);
+  connect(m_zoomButton, &QPushButton::toggled, this,
+          &DicomViewer::onZoomModeToggled);
+  connect(m_qrGenerateButton, &QPushButton::clicked, this,
+          &DicomViewer::onGenerateQr);
+  connect(m_qrDecodeImageButton, &QPushButton::clicked, this,
+          &DicomViewer::onDecodeQrFromImage);
+  connect(m_qrClearButton, &QPushButton::clicked, this,
+          &DicomViewer::onClearQr);
+  connect(m_qrSaveButton, &QPushButton::clicked, this,
+          &DicomViewer::onSaveQrImage);
+  connect(m_qrStartCamButton, &QPushButton::clicked, this,
+          &DicomViewer::onStartQrCamera);
+  connect(m_qrStopCamButton, &QPushButton::clicked, this,
+          &DicomViewer::onStopQrCamera);
+  connect(m_qrCamTimer, &QTimer::timeout, this, &DicomViewer::onQrCameraTick);
+  connect(m_brachyReadButton, &QPushButton::clicked, this,
+          &DicomViewer::onReadBrachyPlan);
+  connect(m_brachyLoadDataButton, &QPushButton::clicked, this,
+          &DicomViewer::onLoadBrachyData);
+  connect(m_brachyCalcDoseButton, &QPushButton::clicked, this,
+          &DicomViewer::onCalculateBrachyDose);
+  connect(m_brachyRandomSourceButton, &QPushButton::clicked, this,
+          &DicomViewer::onGenerateRandomSources);
+  connect(m_brachyTestSourceButton, &QPushButton::clicked, this,
+          &DicomViewer::onGenerateTestSource);
+  connect(m_brachyAddEvalPointButton, &QPushButton::clicked, this,
+          &DicomViewer::onAddDoseEvaluationPoint);
+  connect(m_brachyClearEvalPointsButton, &QPushButton::clicked, this,
+          &DicomViewer::onClearDoseEvaluationPoints);
+  connect(m_brachyOptimizeButton, &QPushButton::clicked, this,
+          &DicomViewer::onOptimizeDwellTimes);
+  connect(m_brachyShowRefPointsCheck, &QCheckBox::stateChanged, this,
+          &DicomViewer::onShowRefPointsChanged);
+  connect(m_structureList, &QListWidget::itemChanged, this,
+          &DicomViewer::onStructureVisibilityChanged);
+  connect(m_structureAllButton, &QPushButton::clicked, this,
+          &DicomViewer::onShowAllStructures);
+  connect(m_structureNoneButton, &QPushButton::clicked, this,
+          &DicomViewer::onHideAllStructures);
+  connect(m_showPointsCheck, &QCheckBox::toggled, this,
+          &DicomViewer::onStructurePointsToggled);
+  connect(m_structureLineWidthSpin, QOverload<int>::of(&QSpinBox::valueChanged),
+          this, &DicomViewer::onStructureLineWidthChanged);
+  connect(m_dvhButton, &QPushButton::clicked, this, &DicomViewer::onShowDVH);
+
+  connect(m_doseModeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+          this, [this](int) {
+            m_doseCalcMode = static_cast<DoseCalcMode>(
+                m_doseModeCombo->currentData().toInt());
+            bool phys = m_doseCalcMode == DoseCalcMode::Physical;
+            m_doseAlphaBetaSpin->setEnabled(!phys);
+            updateDoseShiftLabels();
+          });
+  connect(m_doseAlphaBetaSpin, qOverload<double>(&QDoubleSpinBox::valueChanged),
+          [this](double v) {
+            m_doseAlphaBeta = v;
+            updateDoseShiftLabels();
+          });
+  connect(m_doseCalcButton, &QPushButton::clicked, this,
+          &DicomViewer::onDoseCalculateClicked);
+  connect(m_doseIsosurfaceButton, &QPushButton::clicked, this,
+          &DicomViewer::onDoseIsosurfaceClicked);
+  connect(m_gammaAnalysisButton, &QPushButton::clicked, this,
+          &DicomViewer::onGammaAnalysisClicked);
+  connect(m_randomStudyButton, &QPushButton::clicked, this,
+          &DicomViewer::onRandomStudyClicked);
+
+  for (int i = 0; i < VIEW_COUNT; ++i)
+    updateInteractionButtonVisibility(i);
+  updateOverlayInteractionStates();
+  updateCyberKnifeUiState();
+}
+
+bool DicomViewer::loadDicomFile(const QString &filename) {
+  clearFusionPreviewImage();
+  if (m_dicomReader->loadDicomFile(filename)) {
+    m_ctFilename = QFileInfo(filename).fileName();
+    QImage img = m_dicomReader->getImage();
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      m_currentIndices[i] = 0;
+      m_originalImages[i] = img;
+    }
+    updateImage();
+    updateImageInfo();
+    updateInfoOverlays();
+
+    // デフォルトのWindow/Levelを設定
+    double window, level;
+    m_dicomReader->getWindowLevel(window, level);
+
+    m_windowSlider->setValue(static_cast<int>(window));
+    m_levelSlider->setValue(static_cast<int>(level));
+    m_windowSpinBox->setValue(static_cast<int>(window));
+    m_levelSpinBox->setValue(static_cast<int>(level));
+    m_seriesWindowValues = QVector<double>(1, window);
+    m_seriesLevelValues = QVector<double>(1, level);
+    m_seriesWindowLevelInitialized = QVector<bool>(1, true);
+    m_activeImageSeriesIndex = 0;
+
+    emit imageLoaded(filename);
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      m_sliceSliders[i]->blockSignals(true);
+      if (m_dicomFiles.isEmpty()) {
+        m_sliceSliders[i]->setRange(0, 0);
+        m_sliceSliders[i]->setValue(0);
+        m_sliceSliders[i]->setEnabled(false);
+      } else {
+        m_sliceSliders[i]->setRange(0, m_dicomFiles.size() - 1);
+        m_sliceSliders[i]->setValue(m_currentIndices[i]);
+        m_sliceSliders[i]->setEnabled(true);
+      }
+      m_sliceSliders[i]->blockSignals(false);
+    }
+    updateSliceLabels();
+    updateCyberKnifeUiState();
+    if (!m_aiSuppressSourceTracking) {
+      m_aiHasDicomSource = true;
+      m_aiCurrentDicomSourceIsDirectory = false;
+      m_aiCurrentDicomSourcePath = QFileInfo(filename).absoluteFilePath();
+    }
+    return true;
+  }
+  updateCyberKnifeUiState();
+  return false;
+}
+
+void DicomViewer::loadSlice(int viewIndex, int sliceIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  if (isVolumeLoaded()) {
+    loadVolumeSlice(viewIndex, sliceIndex);
+    return;
+  }
+  if (sliceIndex < 0 || sliceIndex >= m_dicomFiles.size())
+    return;
+  if (m_dicomReader->loadDicomFile(m_dicomFiles[sliceIndex])) {
+    m_dicomReader->setWindowLevel(m_windowSlider->value(),
+                                  m_levelSlider->value());
+    m_originalImages[viewIndex] = m_dicomReader->getImage();
+    m_currentIndices[viewIndex] = sliceIndex;
+    if (m_showSlicePosition)
+      updateImage();
+    else
+      updateImage(viewIndex);
+  }
+
+  // スライス変更時にカーソル情報をリセット
+  if (viewIndex >= 0 && viewIndex < VIEW_COUNT) {
+    if (m_cursorDoseLabels[viewIndex])
+      m_cursorDoseLabels[viewIndex]->hide();
+    m_imageWidgets[viewIndex]->clearCursorCross();
+  }
+}
+
+namespace {
+struct FusionSeriesMetadata {
+  double window{std::numeric_limits<double>::quiet_NaN()};
+  double level{std::numeric_limits<double>::quiet_NaN()};
+};
+
+bool loadFusionVolumeFromDirectory(const QString &directory, DicomVolume &volume,
+                                   FusionSeriesMetadata *outMeta = nullptr) {
+  QDir dir(directory);
+  if (!dir.exists())
+    return false;
+
+  const QString metaPath = dir.filePath(QStringLiteral("fusion_meta.json"));
+  if (!QFile::exists(metaPath))
+    return false;
+
+  QFile metaFile(metaPath);
+  if (!metaFile.open(QIODevice::ReadOnly))
+    return false;
+
+  const QByteArray raw = metaFile.readAll();
+  QJsonParseError parseError{};
+  const QJsonDocument doc = QJsonDocument::fromJson(raw, &parseError);
+  if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+    return false;
+
+  const QJsonObject obj = doc.object();
+  QString volumeFile =
+      obj.value(QStringLiteral("volume_file")).toString().trimmed();
+  if (volumeFile.isEmpty())
+    volumeFile = QStringLiteral("fusion_volume.bin");
+
+  const QString volumePath = dir.filePath(volumeFile);
+  if (!QFile::exists(volumePath))
+    return false;
+  if (!volume.loadFromFile(volumePath))
+    return false;
+
+  if (outMeta) {
+    const QJsonValue winVal = obj.value(QStringLiteral("window"));
+    const QJsonValue lvlVal = obj.value(QStringLiteral("level"));
+    if (winVal.isDouble())
+      outMeta->window = winVal.toDouble();
+    if (lvlVal.isDouble())
+      outMeta->level = lvlVal.toDouble();
+  }
+
+  return true;
+}
+} // namespace
+
+bool DicomViewer::loadDicomDirectory(const QString &directory, bool loadCt,
+                                     bool loadRtss, bool loadRtdose,
+                                     const QStringList &imageSeries,
+                                     const QStringList &modalities,
+                                     int activeSeriesIndex) {
+  clearFusionPreviewImage();
+  auto normalizePath = [](const QString &path) {
+    if (path.isEmpty())
+      return QString();
+    QDir dir(path);
+    QString absolute = QDir::cleanPath(dir.absolutePath());
+    if (absolute == QLatin1String("."))
+      return QString();
+    return absolute;
+  };
+
+  QStringList seriesDirs;
+  QSet<QString> seenDirs;
+  if (imageSeries.isEmpty()) {
+    QString normalized = normalizePath(directory);
+    if (!normalized.isEmpty())
+      seriesDirs << normalized;
+    else if (!directory.isEmpty())
+      seriesDirs << directory;
+  } else {
+    for (const QString &entry : imageSeries) {
+      QString normalized = normalizePath(entry);
+      if (normalized.isEmpty())
+        continue;
+      const QString key = normalized.toLower();
+      if (seenDirs.contains(key))
+        continue;
+      seenDirs.insert(key);
+      seriesDirs << normalized;
+    }
+    QString normalizedDir = normalizePath(directory);
+    if (!normalizedDir.isEmpty()) {
+      bool exists = false;
+      for (const QString &dirEntry : std::as_const(seriesDirs)) {
+        if (dirEntry.compare(normalizedDir, Qt::CaseInsensitive) == 0) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists)
+        seriesDirs.prepend(normalizedDir);
+    }
+    if (seriesDirs.isEmpty() && !directory.isEmpty()) {
+      QString normalized = normalizePath(directory);
+      if (!normalized.isEmpty())
+        seriesDirs << normalized;
+      else
+        seriesDirs << directory;
+    }
+  }
+
+  QStringList seriesModalities = modalities;
+  if (seriesModalities.size() < seriesDirs.size())
+    seriesModalities.resize(seriesDirs.size());
+
+  int resolvedIndex = activeSeriesIndex;
+  if (resolvedIndex < 0 || resolvedIndex >= seriesDirs.size()) {
+    QString normalizedDir = normalizePath(directory);
+    if (!normalizedDir.isEmpty()) {
+      int idx = seriesDirs.indexOf(normalizedDir);
+      if (idx >= 0)
+        resolvedIndex = idx;
+    }
+    if (resolvedIndex < 0 || resolvedIndex >= seriesDirs.size())
+      resolvedIndex = 0;
+  }
+
+  // New study: ensure all previous patient data is completely reset
+  clearImage();
+
+  const int primarySeriesIndex = seriesDirs.isEmpty() ? -1 : 0;
+
+  m_imageSeriesDirs = seriesDirs;
+  m_imageSeriesModalities = seriesModalities;
+  m_activeImageSeriesIndex = resolvedIndex;
+  m_primaryImageSeriesIndex =
+      (primarySeriesIndex < 0) ? 0 : primarySeriesIndex;
+  m_seriesVolumeCache.clear();
+  m_seriesVolumeCache.resize(m_imageSeriesDirs.size());
+  double defaultWindow = m_windowSlider ? m_windowSlider->value() : 256.0;
+  double defaultLevel = m_levelSlider ? m_levelSlider->value() : 128.0;
+  m_seriesWindowValues =
+      QVector<double>(m_imageSeriesDirs.size(), defaultWindow);
+  m_seriesLevelValues =
+      QVector<double>(m_imageSeriesDirs.size(), defaultLevel);
+  m_seriesWindowLevelInitialized =
+      QVector<bool>(m_imageSeriesDirs.size(), false);
+
+  QDir dir(directory);
+  QFileInfoList fileInfos = dir.entryInfoList(QDir::Files, QDir::Name);
+
+  QStringList ctFiles;
+  QStringList rtDoseFiles;
+  QStringList rtStructFiles;
+
+  FusionSeriesMetadata primaryFusionMeta;
+  bool primarySeriesIsFusion = false;
+
+  for (const QFileInfo &info : fileInfos) {
+    QString path = info.absoluteFilePath();
+    DcmFileFormat ff;
+    if (ff.loadFile(path.toLocal8Bit().data()).bad()) {
+      continue;
+    }
+    OFString modality;
+    if (ff.getDataset()->findAndGetOFString(DCM_Modality, modality).good()) {
+      QString mod = QString::fromLatin1(modality.c_str());
+      if (mod == "RTDOSE") {
+        rtDoseFiles << path;
+        continue;
+      } else if (mod == "RTSTRUCT") {
+        rtStructFiles << path;
+        continue;
+      }
+    }
+    ctFiles << path;
+  }
+
+  DicomVolume baseVolumeForAlignment;
+  bool baseVolumeAvailable = false;
+  DicomVolume activeOriginalVolume;
+  bool haveActiveOriginal = false;
+
+  bool volOk = false;
+  bool loaded = false;
+  if (loadCt) {
+    struct Entry {
+      double fallbackPos;
+      QString path;
+      QVector3D pos3;
+      double loc;
+      double sortKey;
+    };
+    std::vector<Entry> entries;
+    QVector3D rowDir, colDir;
+    bool orientationSet = false;
+    for (const QString &path : ctFiles) {
+      double pos = DicomReader::getSlicePosition(path);
+      QVector3D pos3;
+      double locVal = std::numeric_limits<double>::quiet_NaN();
+      DicomReader r;
+      if (r.loadDicomFile(path)) {
+        double x, y, z;
+        if (r.getImagePositionPatient(x, y, z)) {
+          pos3 = QVector3D(x, y, z);
+        }
+        double lv;
+        if (r.getImageLocation(lv))
+          locVal = lv;
+        if (!orientationSet) {
+          double r1, r2, r3, c1, c2, c3;
+          if (r.getImageOrientationPatient(r1, r2, r3, c1, c2, c3)) {
+            rowDir = QVector3D(r1, r2, r3).normalized();
+            colDir = QVector3D(c1, c2, c3).normalized();
+            orientationSet = true;
+          }
+        }
+      }
+      entries.push_back({pos, path, pos3, locVal, 0.0});
+    }
+    QVector3D sliceDir;
+    if (orientationSet)
+      sliceDir = QVector3D::crossProduct(rowDir, colDir).normalized();
+    for (auto &e : entries) {
+      if (orientationSet && !e.pos3.isNull()) {
+        e.sortKey = QVector3D::dotProduct(e.pos3, sliceDir);
+      } else if (!std::isnan(e.loc)) {
+        e.sortKey = e.loc;
+      } else {
+        e.sortKey = e.fallbackPos;
+      }
+    }
+    std::sort(
+        entries.begin(), entries.end(),
+        [](const Entry &a, const Entry &b) { return a.sortKey < b.sortKey; });
+
+    m_dicomFiles.clear();
+    for (const Entry &e : entries) {
+      m_dicomFiles << e.path;
+    }
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      m_currentIndices[i] = 0;
+      m_viewOrientations[i] = DicomVolume::Orientation::Axial;
+    }
+
+    volOk = m_volume.loadFromDirectory(directory);
+    if (!volOk) {
+      FusionSeriesMetadata meta;
+      if (loadFusionVolumeFromDirectory(directory, m_volume, &meta)) {
+        volOk = true;
+        primarySeriesIsFusion = true;
+        primaryFusionMeta = meta;
+      }
+    }
+    if (volOk && m_volume.depth() > 0) {
+      haveActiveOriginal = true;
+      activeOriginalVolume = m_volume;
+
+      if (primarySeriesIndex >= 0 &&
+          primarySeriesIndex < seriesDirs.size()) {
+        if (primarySeriesIndex == resolvedIndex) {
+          baseVolumeForAlignment = m_volume;
+          baseVolumeAvailable = true;
+        } else {
+          const QString baseDir = seriesDirs.at(primarySeriesIndex);
+          if (!baseDir.isEmpty()) {
+            DicomVolume loadedBase;
+            if (loadedBase.loadFromDirectory(baseDir)) {
+              baseVolumeForAlignment = loadedBase;
+              baseVolumeAvailable = true;
+            }
+          }
+        }
+      }
+
+      if (!baseVolumeAvailable) {
+        baseVolumeForAlignment = m_volume;
+        baseVolumeAvailable = true;
+      }
+
+      if (baseVolumeAvailable && haveActiveOriginal &&
+          primarySeriesIndex >= 0 && resolvedIndex != primarySeriesIndex) {
+        const int sliceCount = baseVolumeForAlignment.depth();
+        std::unique_ptr<QProgressDialog> progressDialog;
+        if (sliceCount > 0) {
+          auto dialog = std::make_unique<QProgressDialog>(
+              tr("Image%1 を座標合わせ中...")
+                  .arg(resolvedIndex + 1),
+              QString(), 0, sliceCount, this);
+          dialog->setWindowModality(Qt::ApplicationModal);
+          dialog->setCancelButton(nullptr);
+          dialog->setMinimumDuration(0);
+          dialog->setValue(0);
+          progressDialog = std::move(dialog);
+        }
+        QProgressDialog *progressPtr = progressDialog.get();
+        std::function<void(int, int)> progressCallback;
+        if (progressPtr) {
+          progressCallback = [progressPtr](int done, int total) {
+            QMetaObject::invokeMethod(
+                progressPtr,
+                [progressPtr, done, total]() {
+                  if (!progressPtr)
+                    return;
+                  if (progressPtr->maximum() != total)
+                    progressPtr->setMaximum(total);
+                  progressPtr->setValue(done);
+                },
+                Qt::QueuedConnection);
+          };
+        }
+        cv::Mat resampled = resampleVolumeToReference(
+            baseVolumeForAlignment, activeOriginalVolume, progressCallback);
+        if (progressPtr) {
+          progressPtr->setValue(progressPtr->maximum());
+          progressPtr->close();
+          QCoreApplication::processEvents();
+        }
+        if (!resampled.empty()) {
+          DicomVolume converted;
+          if (converted.createFromReference(baseVolumeForAlignment,
+                                            resampled)) {
+            m_volume = converted;
+            invalidateStructureSurfaceCache();
+          }
+        }
+      }
+    }
+    if (volOk && m_doseLoaded) {
+      updateDoseAlignment();
+      // Enforce native geometry: zero patientShift before first resample
+      m_doseVolume.setPatientShift(QVector3D(0, 0, 0));
+      QFuture<bool> future = QtConcurrent::run([this]() {
+        return m_resampledDose.resampleFromRTDose(
+            m_volume, m_doseVolume,
+            [this](int current, int total) {
+              emit doseLoadProgress(current, total);
+            },
+            true);
+      });
+      while (!future.isFinished()) {
+        QApplication::processEvents();
+        QThread::yieldCurrentThread();
+      }
+      bool ok = future.result();
+      if (ok) {
+        resetDoseRange();
+        updateImage();
+      }
+    }
+    if (!m_dicomFiles.isEmpty()) {
+      m_dicomReader->loadDicomFile(m_dicomFiles[0]);
+      m_ctFilename = QFileInfo(m_dicomFiles[0]).fileName();
+      double window, level;
+      m_dicomReader->getWindowLevel(window, level);
+      m_windowSlider->setValue(static_cast<int>(window));
+      m_levelSlider->setValue(static_cast<int>(level));
+      m_windowSpinBox->setValue(static_cast<int>(window));
+      m_levelSpinBox->setValue(static_cast<int>(level));
+      if (m_activeImageSeriesIndex >= 0 &&
+          m_activeImageSeriesIndex < m_seriesWindowValues.size())
+        m_seriesWindowValues[m_activeImageSeriesIndex] = window;
+      if (m_activeImageSeriesIndex >= 0 &&
+          m_activeImageSeriesIndex < m_seriesLevelValues.size())
+        m_seriesLevelValues[m_activeImageSeriesIndex] = level;
+      if (m_activeImageSeriesIndex >= 0 &&
+          m_activeImageSeriesIndex < m_seriesWindowLevelInitialized.size())
+        m_seriesWindowLevelInitialized[m_activeImageSeriesIndex] = true;
+      updateImageInfo();
+      updateInfoOverlays();
+    }
+
+    if (primarySeriesIsFusion) {
+      double window = primaryFusionMeta.window;
+      double level = primaryFusionMeta.level;
+      if (!std::isfinite(window))
+        window = m_windowSlider ? m_windowSlider->value() : 256.0;
+      if (!std::isfinite(level))
+        level = m_levelSlider ? m_levelSlider->value() : 128.0;
+
+      const int windowInt = static_cast<int>(std::lround(window));
+      const int levelInt = static_cast<int>(std::lround(level));
+
+      if (m_windowSlider)
+        m_windowSlider->setValue(windowInt);
+      if (m_windowSpinBox)
+        m_windowSpinBox->setValue(windowInt);
+      if (m_levelSlider)
+        m_levelSlider->setValue(levelInt);
+      if (m_levelSpinBox)
+        m_levelSpinBox->setValue(levelInt);
+
+      if (m_activeImageSeriesIndex >= 0 &&
+          m_activeImageSeriesIndex < m_seriesWindowValues.size())
+        m_seriesWindowValues[m_activeImageSeriesIndex] = window;
+      if (m_activeImageSeriesIndex >= 0 &&
+          m_activeImageSeriesIndex < m_seriesLevelValues.size())
+        m_seriesLevelValues[m_activeImageSeriesIndex] = level;
+      if (m_activeImageSeriesIndex >= 0 &&
+          m_activeImageSeriesIndex < m_seriesWindowLevelInitialized.size())
+        m_seriesWindowLevelInitialized[m_activeImageSeriesIndex] = true;
+
+      updateImageInfo();
+      updateInfoOverlays();
+    }
+
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      int count = isVolumeLoaded()
+                      ? sliceCountForOrientation(m_viewOrientations[i])
+                      : m_dicomFiles.size();
+      int mid = count > 0 ? count / 2 : 0;
+      m_sliceSliders[i]->blockSignals(true);
+      m_sliceSliders[i]->setRange(0, count > 0 ? count - 1 : 0);
+      m_sliceSliders[i]->setValue(mid);
+      m_sliceSliders[i]->setEnabled(count > 0);
+      m_sliceSliders[i]->blockSignals(false);
+      m_currentIndices[i] = mid;
+    }
+
+    if (volOk && isVolumeLoaded()) {
+      for (int i = 0; i < VIEW_COUNT; ++i) {
+        int count = sliceCountForOrientation(m_viewOrientations[i]);
+        int mid = count > 0 ? count / 2 : 0;
+        loadSlice(i, mid);
+      }
+      try {
+        double window = m_windowSlider ? m_windowSlider->value() : 0.0;
+        double level = m_levelSlider ? m_levelSlider->value() : 0.0;
+        struct OriMap {
+          DicomVolume::Orientation ori;
+          int idx;
+        } om[3] = {{DicomVolume::Orientation::Axial, 0},
+                   {DicomVolume::Orientation::Sagittal, 1},
+                   {DicomVolume::Orientation::Coronal, 2}};
+        for (const auto &e : om) {
+          int cnt = sliceCountForOrientation(e.ori);
+          int mid = cnt > 0 ? cnt / 2 : 0;
+          m_orientationImages[e.idx] = m_volume.getSlice(
+              e.ori == DicomVolume::Orientation::Axial ? mid : mid, e.ori,
+              window, level);
+          m_orientationIndices[e.idx] = mid;
+        }
+      } catch (...) {
+      }
+      updateSliceLabels();
+      updateColorBars();
+      updateViewLayout();
+      for (int i = 0; i < VIEW_COUNT; ++i) {
+        if (m_is3DView[i])
+          update3DView(i);
+      }
+      loaded = true;
+    } else if (!m_dicomFiles.isEmpty()) {
+      int mid = m_dicomFiles.size() / 2;
+      {
+        QScopedValueRollback<bool> guard(m_aiSuppressSourceTracking, true);
+        loaded = loadDicomFile(m_dicomFiles[mid]);
+      }
+      for (int i = 0; i < VIEW_COUNT; ++i) {
+        m_currentIndices[i] = mid;
+        m_sliceSliders[i]->setValue(mid);
+      }
+      updateSliceLabels();
+      updateColorBars();
+      updateViewLayout();
+    }
+  } else {
+    // CTを読み込まない場合でもUIをリセット
+    m_dicomFiles.clear();
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      m_sliceSliders[i]->blockSignals(true);
+      m_sliceSliders[i]->setRange(0, 0);
+      m_sliceSliders[i]->setValue(0);
+      m_sliceSliders[i]->setEnabled(false);
+      m_sliceSliders[i]->blockSignals(false);
+      m_currentIndices[i] = 0;
+    }
+    updateSliceLabels();
+    updateColorBars();
+    updateViewLayout();
+    loaded = true;
+  }
+
+  if (!m_seriesVolumeCache.empty()) {
+    if (!baseVolumeAvailable && isVolumeLoaded()) {
+      baseVolumeForAlignment = m_volume;
+      baseVolumeAvailable = true;
+    }
+    if (baseVolumeAvailable && m_primaryImageSeriesIndex >= 0 &&
+        m_primaryImageSeriesIndex <
+            static_cast<int>(m_seriesVolumeCache.size())) {
+      m_seriesVolumeCache[m_primaryImageSeriesIndex].volume =
+          baseVolumeForAlignment;
+      m_seriesVolumeCache[m_primaryImageSeriesIndex].prepared = true;
+    }
+    if (isVolumeLoaded() && m_activeImageSeriesIndex >= 0 &&
+        m_activeImageSeriesIndex <
+            static_cast<int>(m_seriesVolumeCache.size())) {
+      m_seriesVolumeCache[m_activeImageSeriesIndex].volume = m_volume;
+      m_seriesVolumeCache[m_activeImageSeriesIndex].prepared = true;
+    }
+  }
+
+  if (loaded) {
+    if (loadRtdose && !rtDoseFiles.isEmpty()) {
+      loadRTDoseFile(rtDoseFiles.first());
+    }
+    if (loadRtss && !rtStructFiles.isEmpty()) {
+      loadRTStructFile(rtStructFiles.first());
+    }
+  }
+
+  updateImageSeriesButtons();
+  updateSliderPosition();
+
+  if (loaded) {
+    m_aiHasDicomSource = true;
+    m_aiCurrentDicomSourceIsDirectory = true;
+    m_aiCurrentDicomSourcePath =
+        QDir(directory).absolutePath();
+  }
+  return loaded;
+}
+
+bool DicomViewer::loadRTDoseFile(const QString &filename, bool activate) {
+  qDebug() << "Loading RT-Dose:" << filename;
+
+  RTDoseVolume loadedDose;
+  QFuture<bool> loadFuture = QtConcurrent::run([&]() {
+    return loadedDose.loadFromFile(filename, [this](int current, int total) {
+      emit doseLoadProgress(current, total);
+    });
+  });
+  while (!loadFuture.isFinished()) {
+    QApplication::processEvents();
+    QThread::yieldCurrentThread();
+  }
+  bool loaded = loadFuture.result();
+  if (!loaded)
+    return false;
+
+  if (!isVolumeLoaded()) {
+    qWarning() << "CT volume not loaded; dose stored but not calculated";
+    return false;
+  }
+
+  QString displayName = QFileInfo(filename).fileName();
+
+  RTDoseVolume alignedDose = loadedDose;
+  bool hasIOP = alignedDose.hasIOP();
+  bool adoptIOP = !hasIOP;
+  qDebug() << "Dose IOP present?" << hasIOP << ", adopt CT IOP?" << adoptIOP;
+  if (adoptIOP)
+    alignedDose.adoptOrientationFrom(m_volume);
+
+  QMatrix4x4 id;
+  id.setToIdentity();
+  alignedDose.setCtToDoseTransform(id);
+  alignedDose.setPatientShift(QVector3D(0, 0, 0));
+
+  const RTDoseVolume *resampleSource = nullptr;
+  if (activate) {
+    m_rtDoseFilename = displayName;
+    m_doseVolume = alignedDose;
+    updateDoseAlignment();
+    // Ensure native shift reset before resample
+    m_doseVolume.setPatientShift(QVector3D(0, 0, 0));
+    resampleSource = &m_doseVolume;
+  } else {
+    resampleSource = &alignedDose;
+  }
+
+  if (resampleSource) {
+    QVector3D shift = resampleSource->patientShift();
+    qDebug() << QString("[Dose Align] Final shift: (%1, %2, %3)")
+                    .arg(shift.x(), 0, 'f', 2)
+                    .arg(shift.y(), 0, 'f', 2)
+                    .arg(shift.z(), 0, 'f', 2);
+    QVector3D ctCenter =
+        m_volume.voxelToPatient(m_volume.width() / 2.0, m_volume.height() / 2.0,
+                                m_volume.depth() / 2.0);
+    QVector3D doseVoxel =
+        resampleSource->patientToVoxelContinuous(ctCenter);
+    bool inBounds =
+        (doseVoxel.x() >= -0.5 && doseVoxel.x() < resampleSource->width() - 0.5 &&
+         doseVoxel.y() >= -0.5 && doseVoxel.y() < resampleSource->height() - 0.5 &&
+         doseVoxel.z() >= -0.5 && doseVoxel.z() < resampleSource->depth() - 0.5);
+    qDebug() << QString("[Dose Align] CT center -> Dose voxel (%1,%2,%3) | "
+                        "in-bounds: %4")
+                    .arg(doseVoxel.x(), 0, 'f', 2)
+                    .arg(doseVoxel.y(), 0, 'f', 2)
+                    .arg(doseVoxel.z(), 0, 'f', 2)
+                    .arg(inBounds ? "YES" : "NO");
+  }
+
+  DoseResampledVolume resampled;
+  QFuture<bool> resampleFuture = QtConcurrent::run([&]() {
+    return resampled.resampleFromRTDose(
+        m_volume, *resampleSource,
+        [this](int c, int t) { emit doseLoadProgress(c, t); }, true);
+  });
+  while (!resampleFuture.isFinished()) {
+    QApplication::processEvents();
+    QThread::yieldCurrentThread();
+  }
+  if (!resampleFuture.result()) {
+    qWarning() << "Dose resampling failed";
+    return false;
+  }
+
+  QListWidgetItem *item = nullptr;
+  DoseItemWidget *widget = nullptr;
+  if (m_doseListWidget) {
+    item = new QListWidgetItem(m_doseListWidget);
+    widget = new DoseItemWidget(displayName, resampleSource->maxDose());
+    widget->setChecked(activate);
+    item->setSizeHint(widget->sizeHint());
+    m_doseListWidget->addItem(item);
+    m_doseListWidget->setItemWidget(item, widget);
+
+    // Adjust row height when UI expands/collapses
+    connect(widget, &DoseItemWidget::uiExpandedChanged, this,
+            [this, item, widget]() {
+              QTimer::singleShot(0, this, [this, item, widget]() {
+                widget->adjustSize();
+                item->setSizeHint(widget->sizeHint());
+                m_doseListWidget->setItemWidget(item, widget);
+                m_doseListWidget->doItemsLayout();
+                if (m_doseListWidget->viewport())
+                  m_doseListWidget->viewport()->update();
+              });
+            });
+
+    // 設定変更時はキャッシュ済み線量を無効化し、再計算を要求
+    connect(widget, &DoseItemWidget::settingsChanged, this, [this]() {
+      m_resampledDose.clear();
+      m_doseLoaded = false;
+      updateColorBars();
+      updateImage();
+    });
+    connect(widget, &DoseItemWidget::visibilityChanged, this,
+            [this](bool) {
+              onDoseCalculateClicked();
+              updateDoseShiftLabels();
+            });
+
+    // Connect save button
+    connect(widget, &DoseItemWidget::saveRequested, this, [this, widget]() {
+      onDoseSaveRequested(widget);
+    });
+  }
+
+  if (activate)
+    m_resampledDose = resampled;
+
+  RTDoseVolume storedDose = activate ? m_doseVolume : alignedDose;
+  DoseItem doseItem;
+  doseItem.volume = std::move(resampled);
+  doseItem.widget = widget;
+  doseItem.dose = storedDose;
+  doseItem.isSaved = true; // Loaded from file
+  doseItem.savedFilePath = filename;
+  if (widget) {
+    widget->setSaved(true);
+  }
+  m_doseItems.push_back(std::move(doseItem));
+
+  if (activate) {
+    resetDoseRange();
+    m_doseLoaded = true;
+    if (m_doseRefSpinBox) {
+      double maxDose = m_resampledDose.maxDose();
+      m_doseRefSpinBox->setValue(maxDose);
+      m_doseReference = maxDose;
+    }
+    // Calculate and display dose immediately after loading
+    onDoseCalculateClicked();
+    updateImageInfo();
+  }
+
+  updateDoseShiftLabels();
+  return true;
+}
+
+bool DicomViewer::loadRTStructFile(const QString &filename) {
+  qDebug() << "Loading RTSTRUCT:" << filename;
+  m_rtstructLoaded =
+      m_rtstruct.loadFromFile(filename, [this](int current, int total) {
+        emit structureLoadProgress(current, total);
+      });
+  invalidateStructureSurfaceCache();
+  if (m_rtstructLoaded) {
+    m_lastRtStructPath = QFileInfo(filename).absoluteFilePath();
+    m_structureList->clear();
+    QStringList roiNames;
+    for (int r = 0; r < m_rtstruct.roiCount(); ++r) {
+      QString name = m_rtstruct.roiName(r).trimmed();
+      roiNames << name;
+      QListWidgetItem *it = new QListWidgetItem(name);
+      bool isDefaultHidden = name.compare("Outer Contour", Qt::CaseInsensitive) == 0 ||
+                             name.compare("Outour Contour", Qt::CaseInsensitive) == 0 ||
+                             name.compare("Body", Qt::CaseInsensitive) == 0;
+      it->setCheckState(isDefaultHidden ? Qt::Unchecked : Qt::Checked);
+      if (isDefaultHidden) {
+        m_rtstruct.setROIVisible(r, false);
+      }
+      QColor color = QColor::fromHsv((r * 40) % 360, 255, 255);
+      QPixmap pix(12, 12);
+      pix.fill(color);
+      it->setIcon(QIcon(pix));
+      m_structureList->addItem(it);
+    }
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      if (m_dvhWidgets[i])
+        m_dvhWidgets[i]->setROINames(roiNames);
+      if (m_profileWidgets[i]) {
+        m_profileWidgets[i]->setROINames(roiNames);
+        if (isVolumeLoaded() && m_doseLoaded)
+          m_profileWidgets[i]->setDicomData(&m_volume, &m_resampledDose,
+                                            &m_rtstruct);
+      }
+      if (m_viewContainers[i]->isVisible()) {
+        loadSlice(i, m_currentIndices[i]);
+      }
+    }
+#ifdef USE_ONNXRUNTIME
+    // AI Segmentationタブのコンボボックスを更新
+    updateStructureComboBox();
+#endif
+  } else {
+    m_lastRtStructPath.clear();
+    QStringList empty;
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      if (m_dvhWidgets[i])
+        m_dvhWidgets[i]->setROINames(empty);
+      if (m_profileWidgets[i])
+        m_profileWidgets[i]->setROINames(empty);
+    }
+  }
+  return m_rtstructLoaded;
+}
+
+bool DicomViewer::loadBrachyPlanFile(const QString &filename) {
+  m_brachyLoaded = m_brachyPlan.loadFromFile(filename);
+  m_brachyListWidget->clear();
+  if (m_brachyLoaded) {
+    m_brachyListWidget->addItems(m_brachyPlan.dwellTimeStrings());
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      if (m_viewContainers[i]->isVisible()) {
+        loadSlice(i, m_currentIndices[i]);
+      }
+    }
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      if (m_is3DView[i]) {
+        update3DView(i);
+      }
+    }
+
+    // Enable Calculate button if source data is already loaded
+    bool canCalculate = m_brachyLoaded && m_brachyDoseCalc &&
+                       m_brachyDoseCalc->isInitialized();
+    if (m_brachyCalcDoseButton) {
+      m_brachyCalcDoseButton->setEnabled(canCalculate);
+    }
+
+    // Enable Add Evaluation Point button if volume is loaded
+    if (m_brachyAddEvalPointButton && isVolumeLoaded()) {
+      m_brachyAddEvalPointButton->setEnabled(true);
+    }
+
+    // Update reference points display
+    updateReferencePointsDisplay();
+  }
+  return m_brachyLoaded;
+}
+
+bool DicomViewer::loadCyberKnifeXml(const QString &filePath,
+                                    QString *errorMessage) {
+  if (!m_cyberknifeTextBox) {
+    if (errorMessage)
+      *errorMessage = tr("The CyberKnife tab is not available.");
+    return false;
+  }
+
+  if (m_cyberknifeOcrTextBox)
+    m_cyberknifeOcrTextBox->clear();
+
+  QFile file(filePath);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    if (errorMessage)
+      *errorMessage = tr("Failed to open the file: %1")
+                           .arg(file.errorString());
+    return false;
+  }
+
+  QXmlStreamReader xml(&file);
+  QVector<CyberKnifeBeamData> beams;
+  CyberKnifeDensityModelData planDensityModel;
+  bool densityModelFound = false;
+  QString planReferencePointX;
+  QString planReferencePointY;
+  QString planReferencePointZ;
+  bool planReferencePointFound = false;
+
+  while (!xml.atEnd()) {
+    xml.readNext();
+    if (xml.isStartElement()) {
+      const QStringView elementName = xml.name();
+      if (elementName.compare(u"BEAM", Qt::CaseInsensitive) == 0) {
+        CyberKnifeBeamData beam;
+        if (!parseBeamElement(xml, beam)) {
+          if (errorMessage)
+            *errorMessage = tr("An error occurred while parsing the XML: %1")
+                                 .arg(xml.errorString());
+          return false;
+        }
+        beams.push_back(std::move(beam));
+      } else if (elementName.compare(u"REFERENCE_POINT", Qt::CaseInsensitive) ==
+                     0 ||
+                 elementName.compare(u"REFERENCE_POINT_POSITION",
+                                     Qt::CaseInsensitive) == 0 ||
+                 elementName.compare(u"REF_POINT", Qt::CaseInsensitive) == 0 ||
+                 elementName.compare(u"REF_POINT_POSITION", Qt::CaseInsensitive) ==
+                     0) {
+        const auto attributes = xml.attributes();
+        const QString coordSystem =
+            attributes.value(QLatin1String("coord")).toString().trimmed();
+        QString rx;
+        QString ry;
+        QString rz;
+        if (!parseVectorElement(xml, rx, ry, rz)) {
+          if (errorMessage)
+            *errorMessage =
+                tr("An error occurred while parsing the reference point: %1")
+                    .arg(xml.errorString());
+          return false;
+        }
+        if (coordSystem.compare(QLatin1String("IEC patient frame"),
+                                Qt::CaseInsensitive) == 0) {
+          convertIecPatientToDicom(rx, ry, rz);
+        }
+        if (!rx.trimmed().isEmpty() || !ry.trimmed().isEmpty() ||
+            !rz.trimmed().isEmpty()) {
+          planReferencePointX = rx;
+          planReferencePointY = ry;
+          planReferencePointZ = rz;
+          planReferencePointFound = true;
+        }
+      } else if (elementName.compare(u"DENSITY_MODEL", Qt::CaseInsensitive) ==
+                 0) {
+        if (!densityModelFound) {
+          if (!parseDensityModelElement(xml, planDensityModel)) {
+            if (errorMessage)
+              *errorMessage =
+                  tr("An error occurred while parsing the density model: %1")
+                      .arg(xml.errorString());
+            return false;
+          }
+          densityModelFound = true;
+        } else {
+          xml.skipCurrentElement();
+        }
+      } else if (elementName.compare(u"DXVX_TABLE", Qt::CaseInsensitive) == 0) {
+        xml.skipCurrentElement();
+      }
+    }
+  }
+
+  if (xml.hasError()) {
+    if (errorMessage)
+      *errorMessage = tr("XML parsing error: %1").arg(xml.errorString());
+    return false;
+  }
+
+  if (planReferencePointFound) {
+    for (CyberKnifeBeamData &beam : beams) {
+      if (beam.referencePointX.trimmed().isEmpty())
+        beam.referencePointX = planReferencePointX;
+      if (beam.referencePointY.trimmed().isEmpty())
+        beam.referencePointY = planReferencePointY;
+      if (beam.referencePointZ.trimmed().isEmpty())
+        beam.referencePointZ = planReferencePointZ;
+    }
+  }
+
+  QVector<CyberKnife::GeometryCalculator::BeamGeometry> parsedGeometries;
+  parsedGeometries.reserve(beams.size());
+  QVector<double> parsedWeights;
+  parsedWeights.reserve(beams.size());
+  int invalidGeometryCount = 0;
+  static constexpr std::array<double, 12> kCollimatorSizesMm = {
+      5.0, 7.5, 10.0, 12.5, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 50.0, 60.0};
+  auto parseVector = [&](const QString &sx, const QString &sy, const QString &sz,
+                         QVector3D *out) {
+    bool okx = false;
+    bool oky = false;
+    bool okz = false;
+    double x = parseCyberKnifeDouble(sx, &okx);
+    double y = parseCyberKnifeDouble(sy, &oky);
+    double z = parseCyberKnifeDouble(sz, &okz);
+    if (okx && oky && okz) {
+      *out = QVector3D(x, y, z);
+      return true;
+    }
+    return false;
+  };
+  auto resolveCollimatorSizeMm = [&](const CyberKnifeBeamData &beam,
+                                     bool *okOut) {
+    auto matchKnownSize = [&](double value) {
+      for (double candidate : kCollimatorSizesMm) {
+        if (std::fabs(candidate - value) <= 0.05) {
+          return candidate;
+        }
+      }
+      return value;
+    };
+
+    bool ok = false;
+    const QString sizeText =
+        beam.values.value(QStringLiteral("COLLIMATOR_SIZE_MM"));
+    double sizeValue = parseCyberKnifeDouble(sizeText, &ok);
+    if (ok) {
+      if (okOut)
+        *okOut = true;
+      return matchKnownSize(sizeValue);
+    }
+
+    const QString rawText = beam.values.value(QStringLiteral("COLLIMATOR"));
+    double rawValue = parseCyberKnifeDouble(rawText, &ok);
+    if (ok) {
+      const double matched = matchKnownSize(rawValue);
+      if (std::fabs(matched - rawValue) <= 0.05) {
+        if (okOut)
+          *okOut = true;
+        return matched;
+      }
+
+      const int index = static_cast<int>(std::lround(rawValue));
+      if (index >= 1 && index <= static_cast<int>(kCollimatorSizesMm.size()) &&
+          std::fabs(rawValue - static_cast<double>(index)) <= 0.1) {
+        if (okOut)
+          *okOut = true;
+        return kCollimatorSizesMm[static_cast<size_t>(index - 1)];
+      }
+    }
+
+    static const std::array<QString, 3> kCollimatorIndexKeys = {
+        QStringLiteral("COLLIMATOR_NUMBER"), QStringLiteral("COLLIMATOR_INDEX"),
+        QStringLiteral("COLLIMATOR_ID")};
+    for (const QString &key : kCollimatorIndexKeys) {
+      const QString indexText = beam.values.value(key);
+      double indexValue = parseCyberKnifeDouble(indexText, &ok);
+      if (!ok)
+        continue;
+      const int index = static_cast<int>(std::lround(indexValue));
+      if (index >= 1 &&
+          index <= static_cast<int>(kCollimatorSizesMm.size())) {
+        if (okOut)
+          *okOut = true;
+        return kCollimatorSizesMm[static_cast<size_t>(index - 1)];
+      }
+    }
+
+    if (okOut)
+      *okOut = false;
+    return 0.0;
+  };
+
+  auto parseReferencePoint = [&](const CyberKnifeBeamData &beam,
+                                 QVector3D *out) {
+    auto findValueCaseInsensitive = [&](const QStringList &candidates) {
+      for (const QString &candidate : candidates) {
+        for (auto it = beam.values.constBegin(); it != beam.values.constEnd();
+             ++it) {
+          if (it.key().compare(candidate, Qt::CaseInsensitive) == 0) {
+            const QString value = it.value().trimmed();
+            if (!value.isEmpty())
+              return value;
+          }
+        }
+      }
+      return QString();
+    };
+
+    auto findBySuffix = [&](const QStringList &suffixes) {
+      for (auto it = beam.values.constBegin(); it != beam.values.constEnd();
+           ++it) {
+        const QString key = it.key();
+        if (!key.contains(QStringLiteral("REF"), Qt::CaseInsensitive) ||
+            !key.contains(QStringLiteral("POINT"), Qt::CaseInsensitive))
+          continue;
+        for (const QString &suffix : suffixes) {
+          if (key.endsWith(suffix, Qt::CaseInsensitive)) {
+            const QString value = it.value().trimmed();
+            if (!value.isEmpty())
+              return value;
+          }
+        }
+      }
+      return QString();
+    };
+
+    auto pickComponent = [&](const QString &directValue,
+                             const QStringList &candidates,
+                             const QStringList &suffixes) {
+      QString text = directValue.trimmed();
+      if (!text.isEmpty())
+        return text;
+      text = findValueCaseInsensitive(candidates);
+      if (!text.isEmpty())
+        return text;
+      return findBySuffix(suffixes);
+    };
+
+    const QString xText = pickComponent(
+        beam.referencePointX,
+        {QStringLiteral("REFERENCE_POINT_X"), QStringLiteral("REF_POINT_X"),
+         QStringLiteral("REFPOINT_X"),
+         QStringLiteral("REFERENCE_POINT_POSITION_X"),
+         QStringLiteral("REF_POINT_POSITION_X"),
+         QStringLiteral("REFERENCE_POINT_X_MM"),
+         QStringLiteral("REF_POINT_X_MM")},
+        {QStringLiteral("_X"), QStringLiteral("_X_MM")});
+    const QString yText = pickComponent(
+        beam.referencePointY,
+        {QStringLiteral("REFERENCE_POINT_Y"), QStringLiteral("REF_POINT_Y"),
+         QStringLiteral("REFPOINT_Y"),
+         QStringLiteral("REFERENCE_POINT_POSITION_Y"),
+         QStringLiteral("REF_POINT_POSITION_Y"),
+         QStringLiteral("REFERENCE_POINT_Y_MM"),
+         QStringLiteral("REF_POINT_Y_MM")},
+        {QStringLiteral("_Y"), QStringLiteral("_Y_MM")});
+    const QString zText = pickComponent(
+        beam.referencePointZ,
+        {QStringLiteral("REFERENCE_POINT_Z"), QStringLiteral("REF_POINT_Z"),
+         QStringLiteral("REFPOINT_Z"),
+         QStringLiteral("REFERENCE_POINT_POSITION_Z"),
+         QStringLiteral("REF_POINT_POSITION_Z"),
+         QStringLiteral("REFERENCE_POINT_Z_MM"),
+         QStringLiteral("REF_POINT_Z_MM")},
+        {QStringLiteral("_Z"), QStringLiteral("_Z_MM")});
+
+    bool okx = false;
+    const double x = parseCyberKnifeDouble(xText, &okx);
+    bool oky = false;
+    const double y = parseCyberKnifeDouble(yText, &oky);
+    bool okz = false;
+    const double z = parseCyberKnifeDouble(zText, &okz);
+    if (okx && oky && okz) {
+      if (out)
+        *out = QVector3D(x, y, z);
+      return true;
+    }
+    return false;
+  };
+
+  auto parseOptionalDouble = [&](const QString &value) {
+    bool ok = false;
+    const double number = parseCyberKnifeDouble(value, &ok);
+    return ok ? number : std::numeric_limits<double>::quiet_NaN();
+  };
+
+  QFileInfo info(filePath);
+  QStringList beamLines;
+  beamLines.reserve(beams.size() * 18);
+
+  double totalMu = 0.0;
+  double minMu = std::numeric_limits<double>::max();
+  double maxMu = std::numeric_limits<double>::lowest();
+  int muCount = 0;
+
+  double totalRefDose = 0.0;
+  int refDoseCount = 0;
+
+  QMap<QString, int> collimatorCounts;
+  struct BeamOcrDebugInfo {
+    QString beamLabel;
+    QString rawText;
+    double resolvedSize{0.0};
+    bool resolvedOk{false};
+  };
+  QVector<BeamOcrDebugInfo> ocrDebugInfos;
+  ocrDebugInfos.reserve(beams.size());
+
+  struct BeamReferenceDisplayData {
+    QString beamHeading;
+    QString collimatorText;
+    bool collimatorOk{false};
+    double collimatorValue{0.0};
+    QString sadText;
+    double sadValue{std::numeric_limits<double>::quiet_NaN()};
+    QString depthCaxText;
+    double depthCaxValue{std::numeric_limits<double>::quiet_NaN()};
+    QString depthEffectiveText;
+    double depthEffectiveValue{std::numeric_limits<double>::quiet_NaN()};
+    QString unitDoseText;
+    double unitDoseValue{std::numeric_limits<double>::quiet_NaN()};
+    QString muText;
+    double muValue{std::numeric_limits<double>::quiet_NaN()};
+    bool muValid{false};
+    QString referenceDoseText;
+    double referenceDoseValue{std::numeric_limits<double>::quiet_NaN()};
+    QString alternateDoseText;
+    double alternateDoseValue{std::numeric_limits<double>::quiet_NaN()};
+    QString radius800Text;
+    double radius800Value{std::numeric_limits<double>::quiet_NaN()};
+    QString radiusSadText;
+    double radiusSadValue{std::numeric_limits<double>::quiet_NaN()};
+    QString offAxisXText;
+    double offAxisXValue{std::numeric_limits<double>::quiet_NaN()};
+    QString offAxisYText;
+    double offAxisYValue{std::numeric_limits<double>::quiet_NaN()};
+    QString insideLeafOpeningText;
+    QString tprEquivalentText;
+    double tprEquivalentValue{std::numeric_limits<double>::quiet_NaN()};
+    QString kernelEquivalentText;
+    double kernelEquivalentValue{std::numeric_limits<double>::quiet_NaN()};
+    QString referenceText;
+    QString nodeText;
+    QString targetText;
+    QString upText;
+    QVector3D nodePosition;
+    bool nodeValid{false};
+    QVector3D targetPosition;
+    bool targetValid{false};
+    QVector3D referencePoint;
+    bool referenceValid{false};
+    QVector3D upVector;
+    bool upValid{false};
+    int geometryIndex{-1};
+  };
+  QVector<BeamReferenceDisplayData> beamReferenceDisplays;
+  beamReferenceDisplays.reserve(beams.size());
+  QVector<int> beamGeometryIndices;
+  beamGeometryIndices.reserve(beams.size());
+
+  const DicomVolume *ctVolumePtr = isVolumeLoaded() ? &m_volume : nullptr;
+
+  for (int i = 0; i < beams.size(); ++i) {
+    const CyberKnifeBeamData &beam = beams.at(i);
+
+    auto firstNonEmpty = [&](const QString &primary, const QString &secondary) {
+      QString v = beam.values.value(primary);
+      if (!v.trimmed().isEmpty())
+        return v;
+      if (!secondary.isEmpty()) {
+        QString s = beam.values.value(secondary);
+        if (!s.trimmed().isEmpty())
+          return s;
+      }
+      return QString();
+    };
+
+    auto appendLine = [&](const QString &label, const QString &value) {
+      const QString trimmed = value.trimmed();
+      const QString displayValue =
+          trimmed.isEmpty() ? QStringLiteral("-") : trimmed;
+      beamLines << QStringLiteral("%1: %2").arg(label, displayValue);
+    };
+
+    if (!beamLines.isEmpty())
+      beamLines << QString();
+
+    QString beamId = formatCyberKnifeInt(
+        firstNonEmpty(QStringLiteral("BEAM_ID"), QStringLiteral("BEAMID")));
+    if (beamId == QLatin1String("-"))
+      beamId = QString::number(i + 1);
+    const QString beamHeading = tr("=== Beam %1 ===").arg(beamId);
+    beamLines << beamHeading;
+
+    BeamReferenceDisplayData display;
+    display.beamHeading = beamHeading;
+    display.sadText = QStringLiteral("-");
+    display.depthCaxText = QStringLiteral("-");
+    display.depthEffectiveText = QStringLiteral("-");
+    display.unitDoseText = QStringLiteral("-");
+    display.referenceDoseText = QStringLiteral("-");
+    display.radius800Text = QStringLiteral("-");
+    display.radiusSadText = QStringLiteral("-");
+    display.offAxisXText = QStringLiteral("-");
+    display.offAxisYText = QStringLiteral("-");
+
+    appendLine(QStringLiteral("PATH_ID"),
+               formatCyberKnifeInt(firstNonEmpty(QStringLiteral("PATHID"),
+                                                 QStringLiteral("PATH_ID"))));
+    appendLine(QStringLiteral("NODE_ID"),
+               formatCyberKnifeInt(firstNonEmpty(QStringLiteral("NODEID"),
+                                                 QStringLiteral("NODE_ID"))));
+    appendLine(QStringLiteral("BEAM_PLAN_ID"),
+               formatCyberKnifeInt(firstNonEmpty(QStringLiteral("BEAM_PLAN_ID"),
+                                                 QStringLiteral("BEAMPLANID"))));
+
+    const QString rawCollimatorText =
+        firstNonEmpty(QStringLiteral("COLLIMATOR"),
+                      QStringLiteral("COLLIMATOR_SIZE_MM"));
+    bool resolvedCollimatorOk = false;
+    const double resolvedCollimator =
+        resolveCollimatorSizeMm(beam, &resolvedCollimatorOk);
+    QString formattedCollimator;
+    if (resolvedCollimatorOk) {
+      formattedCollimator = QString::number(resolvedCollimator, 'f', 1);
+    } else {
+      formattedCollimator = formatCyberKnifeFloat(rawCollimatorText, 2);
+    }
+    display.collimatorText = formattedCollimator;
+    display.collimatorOk = resolvedCollimatorOk;
+    display.collimatorValue = resolvedCollimator;
+    appendLine(QStringLiteral("COLLIMATOR (mm)"), formattedCollimator);
+    if (formattedCollimator != QLatin1String("-"))
+      collimatorCounts[formattedCollimator] += 1;
+
+    BeamOcrDebugInfo debugInfo;
+    debugInfo.beamLabel = tr("Beam %1").arg(beamId);
+    debugInfo.rawText = rawCollimatorText;
+    debugInfo.resolvedOk = resolvedCollimatorOk;
+    debugInfo.resolvedSize = resolvedCollimator;
+    ocrDebugInfos.push_back(std::move(debugInfo));
+
+    auto updateLine = [&](int index, const QString &label, const QString &value) {
+      if (index < 0 || index >= beamLines.size())
+        return;
+      const QString trimmed = value.trimmed();
+      const QString displayValue =
+          trimmed.isEmpty() ? QStringLiteral("-") : trimmed;
+      beamLines[index] = QStringLiteral("%1: %2").arg(label, displayValue);
+    };
+
+    auto appendPlaceholder = [&](const QString &label) {
+      appendLine(label, QString());
+      return beamLines.size() - 1;
+    };
+
+    const QString sadLabel = QStringLiteral("SAD (mm)");
+    const QString depthCaxLabel = QStringLiteral("DEPTH_CAX (mm)");
+    const QString depthEffectiveLabel = QStringLiteral("DEPTH_EFFECTIVE (mm)");
+    const QString unitDoseLabel = QStringLiteral("Unit Dose (cGy/MU)");
+    const QString referenceDoseLabel = QStringLiteral("Reference Dose (cGy)");
+    const QString radius800Label = QStringLiteral("Radius 800 (mm)");
+    const QString radiusSadLabel = QStringLiteral("Radius SAD (mm)");
+    const QString offAxisXLabel = QStringLiteral("Off-axis X (mm)");
+    const QString offAxisYLabel = QStringLiteral("Off-axis Y (mm)");
+
+    const int sadLineIndex = appendPlaceholder(sadLabel);
+    const int depthCaxLineIndex = appendPlaceholder(depthCaxLabel);
+    const int depthEffectiveLineIndex = appendPlaceholder(depthEffectiveLabel);
+    const int unitDoseLineIndex = appendPlaceholder(unitDoseLabel);
+
+    QString muText = beam.values.value(QStringLiteral("MU"));
+    QString formattedMu = formatCyberKnifeFloat(muText, 2);
+    appendLine(QStringLiteral("MU"), formattedMu);
+    bool muOk = false;
+    double muValue = muText.trimmed().toDouble(&muOk);
+    display.muText = formattedMu;
+    display.muValue = muValue;
+    display.muValid = muOk;
+    if (muOk) {
+      totalMu += muValue;
+      minMu = std::min(minMu, muValue);
+      maxMu = std::max(maxMu, muValue);
+      ++muCount;
+    }
+
+    const int referenceDoseLineIndex = appendPlaceholder(referenceDoseLabel);
+
+    const QString alternateDoseRaw = firstNonEmpty(
+        QStringLiteral("ALTERNATE_DOSE"),
+        QStringLiteral("ALTERNATE_DOSE_CGY"));
+    const QString alternateDoseFormatted =
+        formatCyberKnifeFloat(alternateDoseRaw, 2);
+    display.alternateDoseText = alternateDoseFormatted;
+    display.alternateDoseValue = parseOptionalDouble(alternateDoseRaw);
+    appendLine(QStringLiteral("Alternate Dose (cGy)"), alternateDoseFormatted);
+
+    const int radius800LineIndex = appendPlaceholder(radius800Label);
+    const int radiusSadLineIndex = appendPlaceholder(radiusSadLabel);
+    const int offAxisXLineIndex = appendPlaceholder(offAxisXLabel);
+    const int offAxisYLineIndex = appendPlaceholder(offAxisYLabel);
+
+    const QString insideLeafText = formatCyberKnifeInt(firstNonEmpty(
+        QStringLiteral("INSIDE_LEAF_OPENING"),
+        QStringLiteral("INSIDE_LEAF_OPENING_FLAG")));
+    appendLine(QStringLiteral("Inside Leaf Opening"), insideLeafText);
+    display.insideLeafOpeningText = insideLeafText;
+    const QString tprEquivalentRaw = firstNonEmpty(
+        QStringLiteral("TPR_EQUIVALENT_SQUARE"),
+        QStringLiteral("TPR_EQUIVALENT_SQUARE_MM"));
+    const QString tprEquivalentFormatted =
+        formatCyberKnifeFloat(tprEquivalentRaw, 2);
+    display.tprEquivalentText = tprEquivalentFormatted;
+    display.tprEquivalentValue = parseOptionalDouble(tprEquivalentRaw);
+    appendLine(QStringLiteral("TPR Equivalent Square (mm)"),
+               tprEquivalentFormatted);
+    const QString kernelEquivalentRaw = firstNonEmpty(
+        QStringLiteral("KERNEL_EQUIVALENT_SQUARE"),
+        QStringLiteral("KERNEL_EQUIVALENT_SQUARE_MM"));
+    const QString kernelEquivalentFormatted =
+        formatCyberKnifeFloat(kernelEquivalentRaw, 2);
+    display.kernelEquivalentText = kernelEquivalentFormatted;
+    display.kernelEquivalentValue = parseOptionalDouble(kernelEquivalentRaw);
+    appendLine(QStringLiteral("Kernel Equivalent Square (mm)"),
+               kernelEquivalentFormatted);
+
+    QVector3D referencePoint;
+    const bool referenceOk = parseReferencePoint(beam, &referencePoint);
+    display.referenceValid = referenceOk;
+    if (referenceOk)
+      display.referencePoint = referencePoint;
+
+    QString referenceLine;
+    if (referenceOk) {
+      auto formatCoordinate = [](double value) {
+        return QString::number(value, 'f', 2);
+      };
+      referenceLine = tr("REFERENCE_POINT (mm): (%1, %2, %3)")
+                          .arg(formatCoordinate(referencePoint.x()),
+                               formatCoordinate(referencePoint.y()),
+                               formatCoordinate(referencePoint.z()));
+    } else {
+      const QString refX = formatCyberKnifeFloat(beam.referencePointX, 2);
+      const QString refY = formatCyberKnifeFloat(beam.referencePointY, 2);
+      const QString refZ = formatCyberKnifeFloat(beam.referencePointZ, 2);
+      if (refX != QLatin1String("-") || refY != QLatin1String("-") ||
+          refZ != QLatin1String("-")) {
+        referenceLine =
+            tr("REFERENCE_POINT (mm): (%1, %2, %3)").arg(refX, refY, refZ);
+      }
+    }
+    if (!referenceLine.isEmpty()) {
+      beamLines << referenceLine;
+    }
+    display.referenceText = referenceLine;
+
+    const QString nodeX = formatCyberKnifeFloat(beam.nodePosX, 2);
+    const QString nodeY = formatCyberKnifeFloat(beam.nodePosY, 2);
+    const QString nodeZ = formatCyberKnifeFloat(beam.nodePosZ, 2);
+    QString nodeLine;
+    if (nodeX != QLatin1String("-") || nodeY != QLatin1String("-") ||
+        nodeZ != QLatin1String("-")) {
+      nodeLine = tr("NODE_POSITION (mm): (%1, %2, %3)")
+                     .arg(nodeX, nodeY, nodeZ);
+      beamLines << nodeLine;
+    }
+    display.nodeText = nodeLine;
+
+    const QString targetX = formatCyberKnifeFloat(beam.targetPosX, 2);
+    const QString targetY = formatCyberKnifeFloat(beam.targetPosY, 2);
+    const QString targetZ = formatCyberKnifeFloat(beam.targetPosZ, 2);
+    QString targetLine;
+    if (targetX != QLatin1String("-") || targetY != QLatin1String("-") ||
+        targetZ != QLatin1String("-")) {
+      targetLine = tr("TARGET_POSITION (mm): (%1, %2, %3)")
+                       .arg(targetX, targetY, targetZ);
+      beamLines << targetLine;
+    }
+    display.targetText = targetLine;
+
+    const QString upX = formatCyberKnifeFloat(beam.upVectorX, 3);
+    const QString upY = formatCyberKnifeFloat(beam.upVectorY, 3);
+    const QString upZ = formatCyberKnifeFloat(beam.upVectorZ, 3);
+    QString upLine;
+    if (upX != QLatin1String("-") || upY != QLatin1String("-") ||
+        upZ != QLatin1String("-")) {
+      upLine = tr("UP_VECTOR: (%1, %2, %3)").arg(upX, upY, upZ);
+      beamLines << upLine;
+    }
+    display.upText = upLine;
+
+    QVector3D nodePosition;
+    QVector3D targetPosition;
+    bool nodeOk = parseVector(beam.nodePosX, beam.nodePosY, beam.nodePosZ,
+                              &nodePosition);
+    bool targetOk =
+        parseVector(beam.targetPosX, beam.targetPosY, beam.targetPosZ,
+                    &targetPosition);
+    display.nodeValid = nodeOk;
+    if (nodeOk)
+      display.nodePosition = nodePosition;
+    display.targetValid = targetOk;
+    if (targetOk)
+      display.targetPosition = targetPosition;
+    QVector3D upVector;
+    bool upOk =
+        parseVector(beam.upVectorX, beam.upVectorY, beam.upVectorZ, &upVector);
+    display.upValid = upOk;
+    if (upOk)
+      display.upVector = upVector;
+
+    beamReferenceDisplays.push_back(display);
+    BeamReferenceDisplayData &displayRef = beamReferenceDisplays.back();
+    displayRef.geometryIndex = -1;
+    beamGeometryIndices.push_back(-1);
+    const int geometryIndexSlot = beamGeometryIndices.size() - 1;
+
+    QString colText = rawCollimatorText;
+    bool colOk = false;
+    double collimatorValue = resolveCollimatorSizeMm(beam, &colOk);
+    if (!colOk) {
+      collimatorValue =
+          colText.isEmpty() ? 0.0 : parseCyberKnifeDouble(colText, &colOk);
+    }
+    bool muWeightOk = false;
+    double muWeight = muText.trimmed().isEmpty()
+                          ? 1.0
+                          : parseCyberKnifeDouble(muText, &muWeightOk);
+    if (!muWeightOk || muWeight <= 0.0)
+      muWeight = 1.0;
+
+    if (nodeOk && targetOk) {
+      const QVector3D axis = targetPosition - nodePosition;
+      const double sadValue = axis.length();
+      if (!qIsFinite(sadValue) || sadValue <= 0.0f) {
+        ++invalidGeometryCount;
+        continue;
+      }
+
+      CyberKnife::GeometryCalculator::BeamGeometry geom;
+      geom.sourcePosition = nodePosition;
+      geom.targetPosition = targetPosition;
+      geom.SAD = sadValue;
+      geom.collimatorSize = colOk ? collimatorValue : 0.0;
+      parsedGeometries.push_back(geom);
+      parsedWeights.push_back(muWeight);
+      const int newGeometryIndex = parsedGeometries.size() - 1;
+      beamGeometryIndices[geometryIndexSlot] = newGeometryIndex;
+      displayRef.geometryIndex = newGeometryIndex;
+
+      if (displayRef.referenceValid) {
+        CyberKnife::CyberKnifeDoseCalculator::CalculationPoint cp;
+        cp.position = displayRef.referencePoint;
+        cp.density = 1.0;
+
+        CyberKnife::CyberKnifeDoseCalculator::RayTracingPointMetrics metrics;
+        bool metricsAvailable = false;
+        if (m_cyberKnifeDoseCalculator) {
+          metricsAvailable = m_cyberKnifeDoseCalculator->computeRayTracingPointMetrics(
+              cp, geom, ctVolumePtr, &metrics);
+        }
+        if (!metricsAvailable) {
+          metrics.ssd = CyberKnife::GeometryCalculator::calculateSSD(geom, cp.position);
+          metrics.depth =
+              CyberKnife::GeometryCalculator::calculateDepth(geom, cp.position);
+          metrics.effectiveDepth = metrics.depth;
+          metrics.offAxis = CyberKnife::GeometryCalculator::calculateOffAxisDistance(
+              geom, cp.position);
+          const QVector3D beamCoords =
+              CyberKnife::GeometryCalculator::patientToBeamCoordinate(cp.position, geom);
+          metrics.offAxisX = beamCoords.x();
+          metrics.offAxisY = beamCoords.y();
+          metrics.radiusSad =
+              std::sqrt(metrics.offAxisX * metrics.offAxisX + metrics.offAxisY * metrics.offAxisY);
+          if (std::isfinite(metrics.ssd) && metrics.ssd > 0.0) {
+            metrics.radius800 = metrics.radiusSad * (800.0 / metrics.ssd);
+          }
+        }
+
+        auto formatNumber = [&](double value, int decimals) {
+          return std::isfinite(value) ? QString::number(value, 'f', decimals)
+                                      : QStringLiteral("-");
+        };
+
+        displayRef.sadValue = metrics.ssd;
+        displayRef.sadText = formatNumber(metrics.ssd, 2);
+        updateLine(sadLineIndex, sadLabel, displayRef.sadText);
+
+        displayRef.depthCaxValue = metrics.depth;
+        displayRef.depthCaxText = formatNumber(metrics.depth, 2);
+        updateLine(depthCaxLineIndex, depthCaxLabel, displayRef.depthCaxText);
+
+        displayRef.depthEffectiveValue = metrics.effectiveDepth;
+        displayRef.depthEffectiveText = formatNumber(metrics.effectiveDepth, 2);
+        updateLine(depthEffectiveLineIndex, depthEffectiveLabel,
+                   displayRef.depthEffectiveText);
+
+        displayRef.radius800Value = metrics.radius800;
+        displayRef.radius800Text = formatNumber(metrics.radius800, 2);
+        updateLine(radius800LineIndex, radius800Label, displayRef.radius800Text);
+
+        displayRef.radiusSadValue = metrics.radiusSad;
+        displayRef.radiusSadText = formatNumber(metrics.radiusSad, 2);
+        updateLine(radiusSadLineIndex, radiusSadLabel, displayRef.radiusSadText);
+
+        displayRef.offAxisXValue = metrics.offAxisX;
+        displayRef.offAxisXText = formatNumber(metrics.offAxisX, 2);
+        updateLine(offAxisXLineIndex, offAxisXLabel, displayRef.offAxisXText);
+
+        displayRef.offAxisYValue = metrics.offAxisY;
+        displayRef.offAxisYText = formatNumber(metrics.offAxisY, 2);
+        updateLine(offAxisYLineIndex, offAxisYLabel, displayRef.offAxisYText);
+
+        if (std::isfinite(metrics.unitDose)) {
+          displayRef.unitDoseValue = metrics.unitDose;
+          displayRef.unitDoseText = formatNumber(metrics.unitDose, 3);
+        } else {
+          displayRef.unitDoseValue = std::numeric_limits<double>::quiet_NaN();
+          displayRef.unitDoseText = QStringLiteral("-");
+        }
+        updateLine(unitDoseLineIndex, unitDoseLabel, displayRef.unitDoseText);
+
+        double referenceDoseValue = std::numeric_limits<double>::quiet_NaN();
+        if (std::isfinite(metrics.unitDose) && displayRef.muValid) {
+          referenceDoseValue = metrics.unitDose * displayRef.muValue;
+        }
+        displayRef.referenceDoseValue = referenceDoseValue;
+        displayRef.referenceDoseText = formatNumber(referenceDoseValue, 2);
+        updateLine(referenceDoseLineIndex, referenceDoseLabel,
+                   displayRef.referenceDoseText);
+        if (std::isfinite(referenceDoseValue)) {
+          totalRefDose += referenceDoseValue;
+          ++refDoseCount;
+        }
+      }
+    } else {
+      ++invalidGeometryCount;
+    }
+  }
+
+  CyberKnifePlanDensityModelInfo newPlanDensity;
+  QString densityModelStatus;
+  if (densityModelFound) {
+    if (!planDensityModel.entries.isEmpty()) {
+      newPlanDensity.valid = true;
+      newPlanDensity.name = planDensityModel.name;
+      newPlanDensity.type = planDensityModel.type;
+      newPlanDensity.typeValue = planDensityModel.typeValue;
+      newPlanDensity.version = planDensityModel.version;
+      newPlanDensity.warnings = planDensityModel.warnings;
+      newPlanDensity.table.entries = planDensityModel.entries;
+      newPlanDensity.table.offset = 0.0;
+      newPlanDensity.table.source = QFileInfo(filePath).absoluteFilePath();
+    } else {
+      densityModelStatus =
+          tr("The plan density model did not contain usable data.");
+    }
+  }
+
+  if (!newPlanDensity.valid) {
+    newPlanDensity.table.entries.clear();
+    newPlanDensity.table.offset = 0.0;
+    newPlanDensity.table.source.clear();
+    newPlanDensity.warnings = planDensityModel.warnings;
+  }
+
+  m_cyberknifePlanDensityModel = newPlanDensity;
+  if (m_cyberknifePlanDensityModel.valid) {
+    m_cyberknifePlanDensityModel.table.source =
+        QDir::toNativeSeparators(m_cyberknifePlanDensityModel.table.source);
+  }
+
+  applyPlanDensityModelToCalculator();
+  if (m_cyberknifePlanDensityModel.valid &&
+      !m_cyberknifePlanDensityModel.applied) {
+    densityModelStatus =
+        tr("Failed to apply the plan density model. Calculator defaults will be used.");
+  }
+
+  if (!m_cyberknifePlanDensityModel.valid) {
+    m_cyberknifePlanDensityModel.applied = false;
+  }
+
+  updateCyberKnifeDensityModelText();
+
+  QStringList summaryLines;
+  if (!collimatorCounts.isEmpty()) {
+    summaryLines << tr("[Collimator Size Distribution]");
+    for (auto it = collimatorCounts.cbegin(); it != collimatorCounts.cend();
+         ++it) {
+      summaryLines << tr("  %1 mm: %2 beams").arg(it.key()).arg(it.value());
+    }
+  }
+  if (muCount > 0) {
+    summaryLines << tr("[MU Statistics]");
+    summaryLines <<
+        tr("  Total: %1").arg(QString::number(totalMu, 'f', 2));
+    summaryLines <<
+        tr("  Average: %1").arg(QString::number(totalMu / muCount, 'f', 2));
+    summaryLines << tr("  Range: %1 - %2")
+                       .arg(QString::number(minMu, 'f', 2),
+                            QString::number(maxMu, 'f', 2));
+  }
+  if (refDoseCount > 0) {
+    summaryLines << tr("[Reference Dose]");
+    summaryLines << tr("  Total: %1 cGy")
+                        .arg(QString::number(totalRefDose, 'f', 2));
+    summaryLines << tr("  Average: %1 cGy")
+                        .arg(QString::number(totalRefDose / refDoseCount, 'f', 2));
+  }
+
+  if (densityModelFound) {
+    summaryLines << tr("[Plan Density Model]");
+    if (!m_cyberknifePlanDensityModel.name.isEmpty()) {
+      summaryLines
+          << tr("  Name: %1").arg(m_cyberknifePlanDensityModel.name.trimmed());
+    }
+    if (!m_cyberknifePlanDensityModel.version.isEmpty()) {
+      summaryLines <<
+          tr("  Version: %1")
+              .arg(m_cyberknifePlanDensityModel.version.trimmed());
+    }
+    QString typeText = m_cyberknifePlanDensityModel.type.trimmed();
+    if (!m_cyberknifePlanDensityModel.typeValue.trimmed().isEmpty()) {
+      const QString valueText = m_cyberknifePlanDensityModel.typeValue.trimmed();
+      if (!typeText.isEmpty())
+        typeText = tr("%1 (value=%2)").arg(typeText, valueText);
+      else
+        typeText = tr("value=%1").arg(valueText);
+    }
+    if (!typeText.isEmpty())
+      summaryLines << tr("  Type: %1").arg(typeText);
+    summaryLines << tr("  Points: %1")
+                        .arg(QString::number(
+                            m_cyberknifePlanDensityModel.table.entries.size()));
+    summaryLines << tr("  Applied to calculator: %1")
+                        .arg(m_cyberknifePlanDensityModel.applied ? tr("Yes")
+                                                                  : tr("No"));
+    if (!densityModelStatus.isEmpty())
+      summaryLines << tr("  Note: %1").arg(densityModelStatus);
+    for (const QString &warning : m_cyberknifePlanDensityModel.warnings) {
+      if (!warning.trimmed().isEmpty())
+        summaryLines << tr("  Warning: %1").arg(warning.trimmed());
+    }
+  } else if (!densityModelStatus.isEmpty()) {
+    summaryLines << densityModelStatus;
+  }
+
+  if (m_cyberknifeOcrTextBox) {
+    QStringList ocrSummaryLines;
+    const bool calculatorReady =
+        m_cyberKnifeDoseCalculator && m_cyberKnifeDoseCalculator->isReady();
+
+    if (calculatorReady) {
+      QStringList referenceLines;
+      referenceLines << tr("[Reference Point Dose]");
+      if (beamReferenceDisplays.isEmpty()) {
+        referenceLines << tr("No beam information is available, so reference point data cannot be shown.");
+      } else {
+        auto formatValue = [&](double value, int decimals, const QString &fallback) {
+          if (std::isfinite(value))
+            return QString::number(value, 'f', decimals);
+          if (!fallback.trimmed().isEmpty())
+            return fallback;
+          return QStringLiteral("-");
+        };
+        auto formatText = [&](const QString &text) {
+          const QString trimmed = text.trimmed();
+          return trimmed.isEmpty() ? QStringLiteral("-") : trimmed;
+        };
+        for (int b = 0; b < beamReferenceDisplays.size(); ++b) {
+          const BeamReferenceDisplayData &display = beamReferenceDisplays.at(b);
+          referenceLines << display.beamHeading;
+          if (!display.referenceValid) {
+            referenceLines << tr("  • Reference point information is not available in this beam.");
+          } else {
+            const int geometryIndex = (b < beamGeometryIndices.size())
+                                          ? beamGeometryIndices.at(b)
+                                          : -1;
+            if (geometryIndex < 0 || geometryIndex >= parsedGeometries.size()) {
+              referenceLines
+                  << tr("  • Beam geometry is invalid; dose cannot be calculated.");
+            } else {
+              CyberKnife::CyberKnifeDoseCalculator::CalculationPoint cp;
+              cp.position = display.referencePoint;
+              cp.density = 1.0;
+
+              const auto &geom = parsedGeometries.at(geometryIndex);
+              const double sadValue =
+                  CyberKnife::GeometryCalculator::calculateSSD(geom, cp.position);
+              double depthCaxValue =
+                  CyberKnife::GeometryCalculator::calculateDepth(geom, cp.position);
+              if (std::isfinite(display.depthCaxValue))
+                depthCaxValue = display.depthCaxValue;
+              double effectiveDepth = std::isfinite(display.depthEffectiveValue)
+                                          ? display.depthEffectiveValue
+                                          : depthCaxValue;
+              const double offAxisValue =
+                  CyberKnife::GeometryCalculator::calculateOffAxisDistance(geom, cp.position);
+              const QVector3D beamCoords =
+                  CyberKnife::GeometryCalculator::patientToBeamCoordinate(cp.position, geom);
+              const double offAxisX = beamCoords.x();
+              const double offAxisY = beamCoords.y();
+              const double radiusSadValue =
+                  std::sqrt(offAxisX * offAxisX + offAxisY * offAxisY);
+              const double radius800Value =
+                  (std::isfinite(sadValue) && sadValue > 0.0)
+                      ? radiusSadValue * (800.0 / sadValue)
+                      : std::numeric_limits<double>::quiet_NaN();
+              const double unitDoseValue =
+                  m_cyberKnifeDoseCalculator->calculatePointDoseWithGeometry(
+                      cp, geom, effectiveDepth, offAxisValue, 1.0);
+              const double muValue = display.muValid ? display.muValue
+                                                      : std::numeric_limits<double>::quiet_NaN();
+              const double referenceDoseValue =
+                  std::isfinite(muValue) ? unitDoseValue * muValue
+                                         : std::numeric_limits<double>::quiet_NaN();
+
+              const QString collimatorText = display.collimatorOk
+                                                  ? QString::number(display.collimatorValue, 'f', 1)
+                                                  : formatText(display.collimatorText);
+              referenceLines << tr("COLLIMATOR (mm): %1").arg(collimatorText);
+              referenceLines << tr("SAD (mm): %1")
+                                     .arg(formatValue(sadValue, 2, display.sadText));
+              referenceLines << tr("DEPTH_CAX (mm): %1")
+                                     .arg(formatValue(depthCaxValue, 2, display.depthCaxText));
+              referenceLines << tr("DEPTH_EFFECTIVE (mm): %1")
+                                     .arg(formatValue(effectiveDepth, 2, display.depthEffectiveText));
+              referenceLines << tr("Unit Dose (cGy/MU): %1")
+                                     .arg(formatValue(unitDoseValue, 3, display.unitDoseText));
+              referenceLines << tr("MU: %1").arg(formatText(display.muText));
+              referenceLines << tr("Reference Dose (cGy): %1")
+                                     .arg(formatValue(referenceDoseValue, 2, display.referenceDoseText));
+              referenceLines << tr("Alternate Dose (cGy): %1")
+                                     .arg(formatText(display.alternateDoseText));
+              referenceLines << tr("Radius 800 (mm): %1")
+                                     .arg(formatValue(radius800Value, 2, display.radius800Text));
+              referenceLines << tr("Radius SAD (mm): %1")
+                                     .arg(formatValue(radiusSadValue, 2, display.radiusSadText));
+              referenceLines << tr("Off-axis X (mm): %1")
+                                     .arg(formatValue(offAxisX, 2, display.offAxisXText));
+              referenceLines << tr("Off-axis Y (mm): %1")
+                                     .arg(formatValue(offAxisY, 2, display.offAxisYText));
+              if (!display.referenceText.trimmed().isEmpty())
+                referenceLines << display.referenceText;
+              referenceLines << tr("Inside Leaf Opening: %1")
+                                     .arg(formatText(display.insideLeafOpeningText));
+              referenceLines << tr("TPR Equivalent Square (mm): %1")
+                                     .arg(formatText(display.tprEquivalentText));
+              referenceLines << tr("Kernel Equivalent Square (mm): %1")
+                                     .arg(formatText(display.kernelEquivalentText));
+              if (!display.nodeText.trimmed().isEmpty())
+                referenceLines << display.nodeText;
+              if (!display.targetText.trimmed().isEmpty())
+                referenceLines << display.targetText;
+              if (!display.upText.trimmed().isEmpty())
+                referenceLines << display.upText;
+            }
+          }
+          if (b + 1 < beamReferenceDisplays.size())
+            referenceLines << QString();
+        }
+      }
+      if (!referenceLines.isEmpty())
+        ocrSummaryLines += referenceLines;
+
+      if (!ocrDebugInfos.isEmpty()) {
+        if (!ocrSummaryLines.isEmpty())
+          ocrSummaryLines << QString();
+        ocrSummaryLines << tr("[OCR Table Assignments]");
+        for (const BeamOcrDebugInfo &info : ocrDebugInfos) {
+          const QString rawText =
+              info.rawText.trimmed().isEmpty() ? tr("Not specified") : info.rawText.trimmed();
+          if (!info.resolvedOk) {
+            ocrSummaryLines
+                << tr("  • %1: Unable to interpret collimator value (input: %2)")
+                       .arg(info.beamLabel, rawText);
+            continue;
+          }
+          double matchedSize = 0.0;
+          QString sourceFile;
+          if (!m_cyberKnifeDoseCalculator->resolveOcrTableInfo(
+                  info.resolvedSize, &matchedSize, &sourceFile)) {
+            ocrSummaryLines
+                << tr("  • %1: No matching OCR table found (parsed size: %2 mm)")
+                       .arg(info.beamLabel, QString::number(info.resolvedSize, 'f', 1));
+            continue;
+          }
+          const QString matchedText = QString::number(matchedSize, 'f', 1);
+          const QString resolvedText = QString::number(info.resolvedSize, 'f', 1);
+          const QString fileName =
+              sourceFile.trimmed().isEmpty() ? tr("Unknown file name") : sourceFile.trimmed();
+          if (std::fabs(matchedSize - info.resolvedSize) > 0.05) {
+            ocrSummaryLines
+                << tr("  • %1: %2 mm → %3 mm (%4)")
+                       .arg(info.beamLabel, resolvedText, matchedText, fileName);
+          } else {
+            ocrSummaryLines
+                << tr("  • %1: %2 mm (%3)")
+                       .arg(info.beamLabel, resolvedText, fileName);
+          }
+        }
+      }
+    } else {
+      if (ocrDebugInfos.isEmpty()) {
+        ocrSummaryLines << tr("No beam information is available, so OCR table assignments cannot be shown.");
+      } else {
+        ocrSummaryLines
+            << tr("Load CyberKnife beam data to display OCR table assignments here.");
+      }
+    }
+
+    const QString summaryText = ocrSummaryLines.join(QLatin1String("\n"));
+    m_cyberknifeOcrTextBox->setPlainText(summaryText);
+    m_cyberknifeOcrTextBox->moveCursor(QTextCursor::Start);
+  }
+
+
+  QStringList output;
+  output << tr("File: %1").arg(info.fileName());
+  output << tr("Total beams: %1").arg(beams.size());
+  output << tr("Beams available for dose calculation: %1")
+               .arg(parsedGeometries.size());
+  if (invalidGeometryCount > 0) {
+    output << tr("Warning: %1 beams were excluded due to missing position information.")
+                  .arg(invalidGeometryCount);
+  }
+  if (!summaryLines.isEmpty()) {
+    output << QString();
+    output += summaryLines;
+  }
+  if (!beamLines.isEmpty()) {
+    output << QString();
+    output += beamLines;
+  } else {
+    output << tr("No BEAM elements were found.");
+  }
+
+  m_cyberknifeTextBox->setPlainText(output.join(QLatin1String("\n")));
+  m_cyberknifeTextBox->moveCursor(QTextCursor::Start);
+  m_lastCyberKnifeDir = info.absolutePath();
+  m_cyberknifeBeamGeometries = std::move(parsedGeometries);
+  m_cyberknifeBeamWeights = std::move(parsedWeights);
+  updateCyberKnifeUiState();
+  return true;
+}
+
+void DicomViewer::onLoadCyberKnifeXml() {
+  QString initialDir = m_lastCyberKnifeDir;
+  if (initialDir.isEmpty())
+    initialDir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+  if (initialDir.isEmpty())
+    initialDir = QDir::homePath();
+  QString filename = QFileDialog::getOpenFileName(
+      this, tr("Open CyberKnife XML"), initialDir,
+      tr("XML Files (*.xml);;All Files (*.*)"));
+  if (filename.isEmpty())
+    return;
+
+  QString error;
+  if (!loadCyberKnifeXml(filename, &error)) {
+    QMessageBox::warning(this, tr("CyberKnife XML"), error);
+    return;
+  }
+
+  if (m_rightTabWidget && m_cyberknifePanel)
+    m_rightTabWidget->setCurrentWidget(m_cyberknifePanel);
+}
+
+void DicomViewer::setCyberKnifeDoseCalculator(
+    CyberKnife::CyberKnifeDoseCalculator *calculator) {
+  m_cyberKnifeDoseCalculator = calculator;
+  if (m_cyberKnifeDoseCalculator) {
+    m_cyberknifeDoseModel = m_cyberKnifeDoseCalculator->doseModel();
+  }
+  if (m_cyberknifeModelCombo) {
+    const int targetValue = static_cast<int>(m_cyberknifeDoseModel);
+    const int index = m_cyberknifeModelCombo->findData(targetValue);
+    if (index >= 0) {
+      QSignalBlocker blocker(m_cyberknifeModelCombo);
+      m_cyberknifeModelCombo->setCurrentIndex(index);
+    }
+  }
+  applyCyberKnifeResolutionSettings();
+  applyCyberKnifeDoseModel();
+  applyPlanDensityModelToCalculator();
+  updateCyberKnifeUiState();
+  updateCyberKnifeDensityModelText();
+}
+
+void DicomViewer::setDatabaseManager(DatabaseManager *dbManager) {
+  m_databaseManager = dbManager;
+}
+
+void DicomViewer::refreshCyberKnifeCalculatorState() {
+  if (m_cyberKnifeDoseCalculator) {
+    m_cyberknifeDoseModel = m_cyberKnifeDoseCalculator->doseModel();
+    if (m_cyberknifeModelCombo) {
+      const int targetValue = static_cast<int>(m_cyberknifeDoseModel);
+      const int index = m_cyberknifeModelCombo->findData(targetValue);
+      if (index >= 0) {
+        QSignalBlocker blocker(m_cyberknifeModelCombo);
+        m_cyberknifeModelCombo->setCurrentIndex(index);
+      }
+    }
+
+#ifdef ENABLE_GPU_DOSE_CALCULATION
+    // Update GPU status display
+    if (m_cyberknifeGpuStatusLabel) {
+      QString gpuStatus;
+      bool gpuAvailable = false;
+
+      // Try to initialize GPU if not already done
+      if (!m_cyberKnifeDoseCalculator->isGPUEnabled()) {
+        // Enable multi-GPU mode if multiple GPUs are available
+        if (m_cyberKnifeDoseCalculator->initializeGPU(true)) {
+          gpuAvailable = true;
+        }
+      } else {
+        gpuAvailable = true;
+      }
+
+      if (gpuAvailable) {
+        QString deviceInfo = m_cyberKnifeDoseCalculator->getGPUDeviceInfo();
+        bool enabled = m_cyberKnifeDoseCalculator->isGPUEnabled();
+        int gpuCount = m_cyberKnifeDoseCalculator->getGPUCount();
+
+        if (enabled) {
+          if (gpuCount > 1) {
+            gpuStatus = tr("🟢 GPU Active (%1 GPUs): %2").arg(gpuCount).arg(deviceInfo);
+          } else {
+            gpuStatus = tr("🟢 GPU Active: %1").arg(deviceInfo);
+          }
+        } else {
+          if (gpuCount > 1) {
+            gpuStatus = tr("🟡 GPU Available (%1 GPUs): %2").arg(gpuCount).arg(deviceInfo);
+          } else {
+            gpuStatus = tr("🟡 GPU Available: %1").arg(deviceInfo);
+          }
+        }
+
+        // Update checkbox state
+        if (m_cyberknifeGpuEnableCheckBox) {
+          QSignalBlocker blocker(m_cyberknifeGpuEnableCheckBox);
+          m_cyberknifeGpuEnableCheckBox->setChecked(enabled);
+          m_cyberknifeGpuEnableCheckBox->setEnabled(true);
+        }
+      } else {
+        gpuStatus = tr("🔴 GPU not available (using CPU)");
+
+        if (m_cyberknifeGpuEnableCheckBox) {
+          QSignalBlocker blocker(m_cyberknifeGpuEnableCheckBox);
+          m_cyberknifeGpuEnableCheckBox->setChecked(false);
+          m_cyberknifeGpuEnableCheckBox->setEnabled(false);
+        }
+      }
+
+      m_cyberknifeGpuStatusLabel->setText(gpuStatus);
+    }
+#endif
+  }
+  applyPlanDensityModelToCalculator();
+  updateCyberKnifeUiState();
+  updateCyberKnifeDensityModelText();
+}
+
+void DicomViewer::applyCyberKnifeResolutionSettings() {
+  int stepXY = m_cyberknifeStepXY;
+  if (m_cyberknifeStepXYCombo) {
+    stepXY = m_cyberknifeStepXYCombo->currentData().toInt();
+  }
+  if (stepXY <= 0)
+    stepXY = 1;
+  m_cyberknifeStepXY = stepXY;
+
+  int stepZ = m_cyberknifeStepZ;
+  if (m_cyberknifeStepZCombo) {
+    stepZ = m_cyberknifeStepZCombo->currentData().toInt();
+  }
+  if (stepZ <= 0)
+    stepZ = 1;
+  m_cyberknifeStepZ = stepZ;
+
+  bool dynamicGridMode = false;
+  if (m_cyberknifeDynamicGridCheckBox) {
+    dynamicGridMode = m_cyberknifeDynamicGridCheckBox->isChecked();
+  }
+  m_cyberknifeDynamicGridMode = dynamicGridMode;
+
+  // Disable StepSize combos when Dynamic Grid Mode is enabled
+  if (m_cyberknifeStepXYCombo && m_cyberknifeStepZCombo) {
+    bool enableStepSize = !dynamicGridMode && !m_cyberknifeCalculating;
+    m_cyberknifeStepXYCombo->setEnabled(enableStepSize);
+    m_cyberknifeStepZCombo->setEnabled(enableStepSize);
+    if (dynamicGridMode) {
+      m_cyberknifeStepXYCombo->setToolTip(
+          tr("StepSize is controlled by Dynamic Grid Mode (always starts with Step 4)"));
+      m_cyberknifeStepZCombo->setToolTip(
+          tr("StepSize is controlled by Dynamic Grid Mode (always starts with Step 4)"));
+    } else {
+      m_cyberknifeStepXYCombo->setToolTip(tr("Set XY resolution step size"));
+      m_cyberknifeStepZCombo->setToolTip(tr("Set Z resolution step size"));
+    }
+  }
+
+  if (m_cyberKnifeDoseCalculator) {
+    CyberKnife::CyberKnifeDoseCalculator::ResolutionOptions options;
+    options.stepXY = m_cyberknifeStepXY;
+    options.stepZ = m_cyberknifeStepZ;
+    options.useDynamicGridMode = m_cyberknifeDynamicGridMode;
+
+    // Read threshold values from UI (convert % to decimal 0.0-1.0)
+    options.dynamicThresholdStep2 = 0.5;  // Default: 50%
+    if (m_cyberknifeDynamicThresholdStep2SpinBox) {
+      options.dynamicThresholdStep2 = m_cyberknifeDynamicThresholdStep2SpinBox->value() / 100.0;
+    }
+
+    options.dynamicThresholdStep1 = 0.7;  // Default: 70%
+    if (m_cyberknifeDynamicThresholdStep1SpinBox) {
+      options.dynamicThresholdStep1 = m_cyberknifeDynamicThresholdStep1SpinBox->value() / 100.0;
+    }
+
+    // Use the same thresholds for interpolation recalculation
+    options.dynamicInterpolationThresholdStep2 = options.dynamicThresholdStep2;
+    options.dynamicInterpolationThresholdStep1 = options.dynamicThresholdStep1;
+
+    options.cancelRequested = &m_cyberknifeCancelRequested;
+    m_cyberKnifeDoseCalculator->setResolutionOptions(options);
+  }
+}
+
+void DicomViewer::applyCyberKnifeDoseModel() {
+  using CyberKnifeModel = CyberKnife::CyberKnifeDoseCalculator::DoseModel;
+  CyberKnifeModel model = m_cyberknifeDoseModel;
+  if (m_cyberknifeModelCombo) {
+    const int value = m_cyberknifeModelCombo->currentData().toInt();
+    model = static_cast<CyberKnifeModel>(value);
+    m_cyberknifeDoseModel = model;
+  }
+
+  if (m_cyberKnifeDoseCalculator) {
+    m_cyberKnifeDoseCalculator->setDoseModel(model);
+  }
+}
+
+void DicomViewer::updateCyberKnifeUiState() {
+  if (!m_cyberknifeDoseCalcButton)
+    return;
+
+  const bool calculatorReady =
+      m_cyberKnifeDoseCalculator && m_cyberKnifeDoseCalculator->isReady();
+  const bool hasBeams = !m_cyberknifeBeamGeometries.isEmpty();
+  const bool hasVolume = isVolumeLoaded();
+  const bool enabled = hasBeams && hasVolume && !m_cyberknifeCalculating;
+  m_cyberknifeDoseCalcButton->setEnabled(enabled);
+
+  const bool resolutionEnabled = !m_cyberknifeCalculating;
+  // StepSize combos are disabled when Dynamic Grid Mode is enabled
+  const bool stepSizeEnabled = resolutionEnabled && !m_cyberknifeDynamicGridMode;
+  if (m_cyberknifeStepXYCombo)
+    m_cyberknifeStepXYCombo->setEnabled(stepSizeEnabled);
+  if (m_cyberknifeStepZCombo)
+    m_cyberknifeStepZCombo->setEnabled(stepSizeEnabled);
+  if (m_cyberknifeModelCombo)
+    m_cyberknifeModelCombo->setEnabled(resolutionEnabled);
+
+  // Dynamic Grid threshold spinboxes are enabled only when Dynamic Grid Mode is checked
+  const bool dynamicThresholdEnabled = resolutionEnabled && m_cyberknifeDynamicGridMode;
+  if (m_cyberknifeDynamicThresholdStep2SpinBox)
+    m_cyberknifeDynamicThresholdStep2SpinBox->setEnabled(dynamicThresholdEnabled);
+  if (m_cyberknifeDynamicThresholdStep1SpinBox)
+    m_cyberknifeDynamicThresholdStep1SpinBox->setEnabled(dynamicThresholdEnabled);
+
+  QString tooltip;
+  if (!calculatorReady) {
+    tooltip =
+        tr("Load CyberKnife beam data (DMTable/TMRtable, etc.) first.");
+  } else if (!hasBeams) {
+    tooltip = tr("Load a CyberKnife XML file to start dose calculation.");
+  } else if (!hasVolume) {
+    tooltip = tr("Load a CT volume before running the dose calculation.");
+  } else if (m_cyberknifeCalculating) {
+    tooltip = tr("Dose calculation is in progress...");
+  }
+  m_cyberknifeDoseCalcButton->setToolTip(tooltip);
+
+  // Cancel button state (always visible, enabled only when calculating)
+  if (m_cyberknifeCancelButton) {
+    m_cyberknifeCancelButton->setEnabled(m_cyberknifeCalculating);
+  }
+
+  // Progress bar is always visible, just reset value when not calculating
+  if (m_cyberknifeProgressBar && !m_cyberknifeCalculating) {
+    m_cyberknifeProgressBar->setValue(0);
+  }
+
+  // Hide status label when not calculating
+  if (m_cyberknifeStatusLabel && !m_cyberknifeCalculating) {
+    m_cyberknifeStatusLabel->setVisible(false);
+    m_cyberknifeStatusLabel->clear();
+  }
+}
+
+void DicomViewer::applyPlanDensityModelToCalculator() {
+  if (!m_cyberKnifeDoseCalculator) {
+    if (m_cyberknifePlanDensityModel.valid)
+      m_cyberknifePlanDensityModel.applied = false;
+    return;
+  }
+
+  if (!m_cyberknifePlanDensityModel.valid) {
+    m_cyberKnifeDoseCalculator->clearDensityTableOverride();
+    m_cyberknifePlanDensityModel.applied = false;
+    return;
+  }
+
+  CyberKnife::CyberKnifeDoseCalculator::DensityTableInfo info =
+      m_cyberknifePlanDensityModel.table;
+  if (info.source.trimmed().isEmpty()) {
+    info.source = tr("Plan density model override");
+  }
+
+  const bool applied = m_cyberKnifeDoseCalculator->applyDensityTableOverride(info);
+  m_cyberknifePlanDensityModel.applied = applied;
+  if (!applied) {
+    m_cyberKnifeDoseCalculator->clearDensityTableOverride();
+  }
+}
+
+void DicomViewer::setBrachyStatusStyle(const QString &borderColor) {
+  if (!m_brachyDataStatus)
+    return;
+  m_brachyStatusBorderColor = borderColor;
+  const QString border = borderColor.isEmpty()
+                             ? QStringLiteral("#666666")
+                             : borderColor;
+  const QString style = QStringLiteral(
+                             "QLabel { background-color: #000000; color: %1; "
+                             "padding: 5px; border: 1px solid %2; border-radius: 3px; }")
+                             .arg(ThemeManager::instance().textColorCss(), border);
+  m_brachyDataStatus->setStyleSheet(style);
+}
+
+void DicomViewer::updateCyberKnifeDensityModelText() {
+  if (!m_cyberknifeDensityTextBox)
+    return;
+
+  QStringList lines;
+  lines << tr("Refresh timing: updates after loading CyberKnife beam data or applying a plan density model.");
+
+  const bool calculatorReady =
+      m_cyberKnifeDoseCalculator && m_cyberKnifeDoseCalculator->isReady();
+  const bool planLoaded = m_cyberknifePlanDensityModel.valid &&
+                          !m_cyberknifePlanDensityModel.table.entries.isEmpty();
+
+  if (!calculatorReady && !planLoaded) {
+    lines << QString();
+    lines << tr("No CyberKnife beam data is currently loaded.");
+    lines << tr("Load beam data from the menu to preview Output Factor / TMR / OCR samples.");
+    m_cyberknifeDensityTextBox->setPlainText(lines.join(QLatin1Char('\n')));
+    m_cyberknifeDensityTextBox->moveCursor(QTextCursor::Start);
+    return;
+  }
+
+  lines << QString();
+
+  CyberKnife::CyberKnifeDoseCalculator::DensityTableInfo info;
+  if (planLoaded) {
+    info = m_cyberknifePlanDensityModel.table;
+  } else if (m_cyberKnifeDoseCalculator) {
+    info = m_cyberKnifeDoseCalculator->densityTableInfo();
+  }
+
+  if (!info.isValid()) {
+    m_cyberknifeDensityTextBox->setPlainText(
+        tr("Density model data is not available."));
+    m_cyberknifeDensityTextBox->moveCursor(QTextCursor::Start);
+    return;
+  }
+
+  QLocale locale;
+  const CyberKnife::BeamDataManager *beamDataManager =
+      m_cyberKnifeDoseCalculator
+          ? m_cyberKnifeDoseCalculator->beamDataManager()
+          : nullptr;
+  const bool hasBeamData =
+      beamDataManager && beamDataManager->isDataLoaded();
+  QString sourceText = info.source.trimmed();
+  if (sourceText.isEmpty()) {
+    sourceText = planLoaded ? tr("Plan density model") : tr("Unknown");
+  } else if (!planLoaded && sourceText == QStringLiteral("built-in defaults")) {
+    sourceText = tr("Built-in defaults");
+  } else {
+    sourceText = QDir::toNativeSeparators(sourceText);
+  }
+
+  if (planLoaded) {
+    lines << tr("Plan density model source: %1").arg(sourceText);
+    if (!m_cyberknifePlanDensityModel.name.trimmed().isEmpty()) {
+      lines << tr("Name: %1")
+                    .arg(m_cyberknifePlanDensityModel.name.trimmed());
+    }
+    if (!m_cyberknifePlanDensityModel.version.trimmed().isEmpty()) {
+      lines << tr("Version: %1")
+                    .arg(m_cyberknifePlanDensityModel.version.trimmed());
+    }
+    QString typeText = m_cyberknifePlanDensityModel.type.trimmed();
+    const QString typeValue = m_cyberknifePlanDensityModel.typeValue.trimmed();
+    if (!typeValue.isEmpty()) {
+      if (!typeText.isEmpty())
+        typeText = tr("%1 (value=%2)").arg(typeText, typeValue);
+      else
+        typeText = tr("value=%1").arg(typeValue);
+    }
+    if (!typeText.isEmpty())
+      lines << tr("Type: %1").arg(typeText);
+    lines << tr("Applied to calculator: %1")
+                 .arg(m_cyberknifePlanDensityModel.applied ? tr("Yes")
+                                                           : tr("No"));
+    if (!m_cyberknifePlanDensityModel.warnings.isEmpty()) {
+      lines << tr("Warnings:");
+      for (const QString &warning : m_cyberknifePlanDensityModel.warnings) {
+        if (!warning.trimmed().isEmpty())
+          lines << tr("  • %1").arg(warning.trimmed());
+      }
+    }
+  } else {
+    lines << tr("Density model source: %1").arg(sourceText);
+  }
+
+  lines << tr("Offset: %1").arg(locale.toString(info.offset, 'f', 1));
+  lines << tr("Points: %1").arg(locale.toString(info.entries.size()));
+  lines << QString();
+  lines << tr("CT (HU)\tDensity");
+
+  for (const auto &entry : info.entries) {
+    const double ctValue = entry.first - info.offset;
+    const int ctDecimals =
+        (std::fabs(ctValue - std::floor(ctValue)) < 1e-6) ? 0 : 3;
+    const QString ctText = locale.toString(ctValue, 'f', ctDecimals);
+    const QString densityText = locale.toString(entry.second, 'f', 6);
+    lines << QStringLiteral("%1\t%2").arg(ctText, densityText);
+  }
+
+  if (hasBeamData) {
+    lines << QString();
+    lines << tr("[Beam Data Preview]");
+
+    const auto &dmData = beamDataManager->dmData();
+    if (!dmData.collimatorSizes.empty() && !dmData.outputFactors.empty()) {
+      const QString depthText =
+          locale.toString(dmData.depth, 'f', 1);
+      lines << tr("Output factors @ depth %1 mm:").arg(depthText);
+      const int sampleCount =
+          qMin<int>(static_cast<int>(dmData.collimatorSizes.size()), 5);
+      for (int i = 0; i < sampleCount; ++i) {
+        const QString sizeText =
+            locale.toString(dmData.collimatorSizes[i], 'f', 1);
+        const QString ofText =
+            locale.toString(dmData.outputFactors[i], 'f', 4);
+        lines << tr("  %1 mm: %2").arg(sizeText, ofText);
+      }
+      if (static_cast<int>(dmData.collimatorSizes.size()) > sampleCount) {
+        lines << tr("  ... (total sizes: %1)")
+                     .arg(locale.toString(
+                         static_cast<qlonglong>(dmData.collimatorSizes.size())));
+      }
+    } else {
+      lines << tr("Output factors: (no data)");
+    }
+
+    const auto &tmrData = beamDataManager->tmrData();
+    if (!tmrData.fieldSizes.empty() && !tmrData.depths.empty()
+        && !tmrData.tmrValues.empty()) {
+      lines << QString();
+      lines << tr("TMR samples:");
+      const int fieldSampleCount =
+          qMin<int>(static_cast<int>(tmrData.fieldSizes.size()), 3);
+      const int depthSampleCount =
+          qMin<int>(static_cast<int>(tmrData.depths.size()), 3);
+      for (int f = 0; f < fieldSampleCount; ++f) {
+        QStringList depthSamples;
+        for (int d = 0; d < depthSampleCount; ++d) {
+          if (d >= static_cast<int>(tmrData.tmrValues.size())
+              || f >= static_cast<int>(tmrData.tmrValues[d].size())) {
+            continue;
+          }
+          const QString depthText = locale.toString(tmrData.depths[d], 'f', 1);
+          const QString valueText =
+              locale.toString(tmrData.tmrValues[d][f], 'f', 4);
+          depthSamples << tr("%1mm=%2").arg(depthText, valueText);
+        }
+        if (!depthSamples.isEmpty()) {
+          const QString fieldText =
+              locale.toString(tmrData.fieldSizes[f], 'f', 1);
+          lines << tr("  %1 mm: %2").arg(fieldText,
+                                           depthSamples.join(QStringLiteral(", ")));
+        }
+      }
+      if (static_cast<int>(tmrData.fieldSizes.size()) > fieldSampleCount
+          || static_cast<int>(tmrData.depths.size()) > depthSampleCount) {
+        lines << tr("  ... (fields: %1, depths: %2)")
+                     .arg(locale.toString(
+                              static_cast<qlonglong>(tmrData.fieldSizes.size())))
+                     .arg(locale.toString(
+                              static_cast<qlonglong>(tmrData.depths.size())));
+      }
+    } else {
+      lines << QString();
+      lines << tr("TMR table: (no data)");
+    }
+
+    const auto &ocrDataMap = beamDataManager->ocrData();
+    if (!ocrDataMap.empty()) {
+      lines << QString();
+      auto it = ocrDataMap.cbegin();
+      const auto &ocr = it->second;
+      const QString collimatorText = locale.toString(ocr.collimatorSize, 'f', 1);
+      QString source = ocr.sourceFileName.trimmed();
+      if (!source.isEmpty()) {
+        source = QDir::toNativeSeparators(source);
+      } else {
+        source = tr("(unknown source)");
+      }
+      lines << tr("OCR sample (collimator %1 mm, %2)")
+                   .arg(collimatorText, source);
+      const int depthSampleCount =
+          qMin<int>(static_cast<int>(ocr.depths.size()), 2);
+      const int radiusSampleCount =
+          qMin<int>(static_cast<int>(ocr.radii.size()), 4);
+      for (int d = 0; d < depthSampleCount; ++d) {
+        QStringList radiusSamples;
+        for (int r = 0; r < radiusSampleCount; ++r) {
+          if (d >= static_cast<int>(ocr.ratios.size())
+              || r >= static_cast<int>(ocr.ratios[d].size())) {
+            continue;
+          }
+          const QString radiusText = locale.toString(ocr.radii[r], 'f', 1);
+          const QString ratioText =
+              locale.toString(ocr.ratios[d][r], 'f', 4);
+          radiusSamples << tr("%1mm=%2").arg(radiusText, ratioText);
+        }
+        if (!radiusSamples.isEmpty()) {
+          const QString depthText = locale.toString(ocr.depths[d], 'f', 1);
+          lines << tr("  Depth %1 mm: %2")
+                       .arg(depthText,
+                            radiusSamples.join(QStringLiteral(", ")));
+        }
+      }
+      if (static_cast<int>(ocr.depths.size()) > depthSampleCount
+          || static_cast<int>(ocr.radii.size()) > radiusSampleCount) {
+        lines << tr("  ... (depths: %1, radii: %2)")
+                     .arg(locale.toString(
+                              static_cast<qlonglong>(ocr.depths.size())))
+                     .arg(locale.toString(
+                              static_cast<qlonglong>(ocr.radii.size())));
+      }
+    } else {
+      lines << QString();
+      lines << tr("OCR tables: (no data)");
+    }
+  }
+
+  m_cyberknifeDensityTextBox->setPlainText(
+      lines.join(QLatin1Char('\n')));
+  m_cyberknifeDensityTextBox->moveCursor(QTextCursor::Start);
+}
+
+void DicomViewer::onCyberKnifeDoseCalcClicked() {
+  if (m_cyberknifeCalculating)
+    return;
+
+  if (m_cyberKnifeDoseCalculator && !m_cyberKnifeDoseCalculator->isReady()) {
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const bool initialized =
+        m_cyberKnifeDoseCalculator->initialize(QString());
+    QApplication::restoreOverrideCursor();
+    if (initialized) {
+      updateCyberKnifeUiState();
+    }
+  }
+
+  if (!m_cyberKnifeDoseCalculator || !m_cyberKnifeDoseCalculator->isReady()) {
+    QString message = tr("The dose calculation engine has not been initialized.");
+    if (m_cyberKnifeDoseCalculator) {
+      const QStringList errors = m_cyberKnifeDoseCalculator->lastErrors();
+      if (!errors.isEmpty())
+        message = errors.join(QStringLiteral("\n"));
+    }
+    QMessageBox::warning(this, tr("CyberKnife Dose"),
+                         message);
+    updateCyberKnifeUiState();
+    return;
+  }
+
+  if (!isVolumeLoaded()) {
+    QMessageBox::warning(this, tr("CyberKnife Dose"),
+                         tr("Please load a CT volume."));
+    updateCyberKnifeUiState();
+    return;
+  }
+
+  if (m_cyberknifeBeamGeometries.isEmpty()) {
+    QMessageBox::warning(this, tr("CyberKnife Dose"),
+                         tr("Please load beam information from a CyberKnife XML file."));
+    updateCyberKnifeUiState();
+    return;
+  }
+
+  if (!m_cyberknifeDoseWatcher) {
+    m_cyberknifeDoseWatcher =
+        new QFutureWatcher<CyberKnifeDoseResult>(this);
+    connect(m_cyberknifeDoseWatcher,
+            &QFutureWatcher<CyberKnifeDoseResult>::finished, this,
+            &DicomViewer::onCyberKnifeDoseCalculationFinished);
+  }
+
+  // Reset cancellation flag before starting new calculation
+  m_cyberknifeCancelRequested.store(false);
+
+  m_cyberknifeCalculating = true;
+  if (m_cyberknifeProgressBar) {
+    m_cyberknifeProgressBar->setRange(0, 100);
+    m_cyberknifeProgressBar->setValue(0);
+    m_cyberknifeProgressBar->setVisible(true);
+  }
+
+  // Show status for Dynamic Grid Mode
+  if (m_cyberknifeStatusLabel && m_cyberknifeDynamicGridMode) {
+    m_cyberknifeStatusLabel->setText(
+        tr("Dynamic Grid Size Mode: Pass 1/3 (StepSize 4)"));
+    m_cyberknifeStatusLabel->setVisible(true);
+  }
+
+#ifdef ENABLE_GPU_DOSE_CALCULATION
+  // Update GPU status before calculation
+  if (m_cyberknifeGpuStatusLabel && m_cyberKnifeDoseCalculator) {
+    if (m_cyberKnifeDoseCalculator->isGPUEnabled()) {
+      QString deviceInfo = m_cyberKnifeDoseCalculator->getGPUDeviceInfo();
+      m_cyberknifeGpuStatusLabel->setText(
+          tr("⚡ GPU Computing: %1").arg(deviceInfo));
+    } else {
+      m_cyberknifeGpuStatusLabel->setText(
+          tr("💻 CPU Computing"));
+    }
+  }
+#endif
+
+  updateCyberKnifeUiState();
+
+  QVector<CyberKnife::GeometryCalculator::BeamGeometry> beams =
+      m_cyberknifeBeamGeometries;
+  QVector<double> weights = m_cyberknifeBeamWeights;
+  if (weights.size() != beams.size()) {
+    weights.resize(beams.size());
+    std::fill(weights.begin(), weights.end(), 1.0);
+  }
+
+  DicomVolume volumeCopy = m_volume;
+  CyberKnife::CyberKnifeDoseCalculator *calculator =
+      m_cyberKnifeDoseCalculator;
+  QPointer<DicomViewer> guard(this);
+
+  // Capture threshold values for display in progress messages
+  double thresholdStep2Percent = 50.0;  // Default: 50%
+  if (m_cyberknifeDynamicThresholdStep2SpinBox) {
+    thresholdStep2Percent = m_cyberknifeDynamicThresholdStep2SpinBox->value();
+  }
+  double thresholdStep1Percent = 70.0;  // Default: 70%
+  if (m_cyberknifeDynamicThresholdStep1SpinBox) {
+    thresholdStep1Percent = m_cyberknifeDynamicThresholdStep1SpinBox->value();
+  }
+
+  auto future = QtConcurrent::run(
+      [volumeCopy, beams, weights, calculator, guard, thresholdStep2Percent, thresholdStep1Percent]() -> CyberKnifeDoseResult {
+        CyberKnifeDoseResult result;
+        if (!calculator || beams.isEmpty()) {
+          result.errors << QObject::tr("No beams are available for the dose calculation.");
+          return result;
+        }
+
+        const int beamCount = beams.size();
+        int dims[3] = {volumeCopy.depth(), volumeCopy.height(),
+                       volumeCopy.width()};
+        if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+          result.errors << QObject::tr("The CT volume is empty.");
+          return result;
+        }
+
+        auto updateProgress = [guard, beamCount, thresholdStep2Percent,
+                               thresholdStep1Percent](int beamIndex,
+                                                       int percent) {
+          if (!guard)
+            return;
+          double ratio = std::clamp(percent, 0, 100) / 100.0;
+          double overall = (static_cast<double>(beamIndex) + ratio) /
+                           std::max(1, beamCount);
+          int value = std::clamp(static_cast<int>(std::round(overall * 100.0)),
+                                 0, 100);
+          QMetaObject::invokeMethod(
+              guard, [guard, value, thresholdStep2Percent,
+                      thresholdStep1Percent]() {
+                if (!guard)
+                  return;
+                if (guard->m_cyberknifeProgressBar)
+                  guard->m_cyberknifeProgressBar->setValue(value);
+
+                // Update Dynamic Grid Mode status based on progress
+                if (guard->m_cyberknifeDynamicGridMode && guard->m_cyberknifeStatusLabel) {
+                  if (value < 35) {
+                    guard->m_cyberknifeStatusLabel->setText(
+                        QObject::tr("Dynamic Grid Mode: Pass 1/3 (StepSize 4)"));
+                  } else if (value < 70) {
+                    guard->m_cyberknifeStatusLabel->setText(
+                        QObject::tr("Dynamic Grid Mode: Pass 2/3 (StepSize 2 - ≥%1% max dose)")
+                            .arg(thresholdStep2Percent, 0, 'f', 0));
+                  } else {
+                    guard->m_cyberknifeStatusLabel->setText(
+                        QObject::tr("Dynamic Grid Mode: Pass 3/3 (StepSize 1 - ≥%1% max dose)")
+                            .arg(thresholdStep1Percent, 0, 'f', 0));
+                  }
+                }
+              },
+              Qt::QueuedConnection);
+        };
+
+        std::function<void(int, int)> progressCallback;
+        if (beamCount > 0)
+          progressCallback = updateProgress;
+
+        RTDoseVolume combinedDose;
+        if (!calculator->calculateMultiBeamVolumeDoseWithProgress(
+                volumeCopy, beams, weights, progressCallback, combinedDose)) {
+          result.errors = calculator->lastErrors();
+          if (result.errors.isEmpty()) {
+            result.errors << QObject::tr("CyberKnife dose calculation failed.");
+          }
+          return result;
+        }
+
+        result.dose = combinedDose;
+        const cv::Mat &doseMat = result.dose.data();
+
+        // デバッグ: setFromMat に渡すパラメータ
+        qDebug() << "=== SETFROMMAT DEBUG (after calculation) ===";
+        qDebug() << QString("  volumeCopy origin: (%1, %2, %3)")
+            .arg(volumeCopy.originX()).arg(volumeCopy.originY()).arg(volumeCopy.originZ());
+        qDebug() << QString("  volumeCopy voxelToPatient(0,0,0): (%1, %2, %3)")
+            .arg(volumeCopy.voxelToPatient(0,0,0).x())
+            .arg(volumeCopy.voxelToPatient(0,0,0).y())
+            .arg(volumeCopy.voxelToPatient(0,0,0).z());
+        qDebug() << QString("  result.dose origin: (%1, %2, %3)")
+            .arg(result.dose.originX()).arg(result.dose.originY()).arg(result.dose.originZ());
+        qDebug() << QString("  Using result.dose origin for setFromMat");
+
+        // CRITICAL: Use dose origin, NOT CT origin!
+        // The dose origin is calculated from CT voxel (0,0,0) which may differ
+        // from CT ImagePositionPatient if CT has non-zero m_zOffsets[0]
+        result.volume.setFromMat(doseMat, volumeCopy.spacingX(),
+                                 volumeCopy.spacingY(), volumeCopy.spacingZ(),
+                                 result.dose.originX(), result.dose.originY(),
+                                 result.dose.originZ());
+        result.volume.updateMaxDose();
+        result.success = true;
+
+        if (guard) {
+          QMetaObject::invokeMethod(guard, [guard]() {
+            if (!guard)
+              return;
+            if (guard->m_cyberknifeProgressBar)
+              guard->m_cyberknifeProgressBar->setValue(100);
+          }, Qt::QueuedConnection);
+        }
+        return result;
+      });
+
+  m_cyberknifeDoseWatcher->setFuture(future);
+}
+
+void DicomViewer::onCyberKnifeDoseCalculationFinished() {
+  if (!m_cyberknifeDoseWatcher)
+    return;
+
+  CyberKnifeDoseResult result = m_cyberknifeDoseWatcher->result();
+  m_cyberknifeDoseWatcher->deleteLater();
+  m_cyberknifeDoseWatcher = nullptr;
+  m_cyberknifeCalculating = false;
+
+  // Check if calculation was cancelled by user
+  bool userCancelled = m_cyberknifeCancelRequested.load();
+
+  if (m_cyberknifeProgressBar) {
+    if (result.success) {
+      m_cyberknifeProgressBar->setValue(100);
+    }
+    // Progress bar remains visible (no longer hidden after calculation)
+  }
+
+  if (!result.success) {
+    if (userCancelled) {
+      // User requested cancellation
+      if (m_cyberknifeStatusLabel) {
+        m_cyberknifeStatusLabel->setText(tr("Calculation cancelled"));
+        m_cyberknifeStatusLabel->setVisible(true);
+        QTimer::singleShot(2000, this, [this]() {
+          if (m_cyberknifeStatusLabel && !m_cyberknifeCalculating)
+            m_cyberknifeStatusLabel->setVisible(false);
+        });
+      }
+    } else {
+      // Calculation failed for other reasons
+      QString message = result.errors.isEmpty()
+                            ? tr("CyberKnife dose calculation failed.")
+                            : result.errors.join(QStringLiteral("\n"));
+      QMessageBox::warning(this, tr("CyberKnife Dose"), message);
+    }
+    updateCyberKnifeUiState();
+    return;
+  }
+
+  const QString label = tr("CyberKnife Dose");
+  if (m_doseListWidget) {
+    for (int i = m_doseListWidget->count() - 1; i >= 0; --i) {
+      QListWidgetItem *item = m_doseListWidget->item(i);
+      QWidget *widget = m_doseListWidget->itemWidget(item);
+      auto *doseWidget = qobject_cast<DoseItemWidget *>(widget);
+      if (doseWidget && doseWidget->name() == label) {
+        m_doseListWidget->takeItem(i);
+        delete item;
+        delete doseWidget;
+        if (i >= 0 && i < static_cast<int>(m_doseItems.size())) {
+          m_doseItems.erase(m_doseItems.begin() + i);
+        }
+      }
+    }
+  } else {
+    m_doseItems.clear();
+  }
+
+  // Deactivate all existing dose items before adding new calculated dose
+  for (auto &doseItem : m_doseItems) {
+    if (doseItem.widget) {
+      doseItem.widget->setChecked(false);
+    }
+  }
+
+  DoseItemWidget *widget = nullptr;
+  QListWidgetItem *item = nullptr;
+  if (m_doseListWidget) {
+    item = new QListWidgetItem(m_doseListWidget);
+    widget = new DoseItemWidget(label, result.dose.maxDose());
+    widget->setChecked(true);  // Ensure dose is checked by default
+    item->setSizeHint(widget->sizeHint());
+    m_doseListWidget->addItem(item);
+    m_doseListWidget->setItemWidget(item, widget);
+
+    connect(widget, &DoseItemWidget::uiExpandedChanged, this,
+            [this, item, widget]() {
+              QTimer::singleShot(0, this, [this, item, widget]() {
+                if (!m_doseListWidget)
+                  return;
+                widget->adjustSize();
+                item->setSizeHint(widget->sizeHint());
+                m_doseListWidget->setItemWidget(item, widget);
+                m_doseListWidget->doItemsLayout();
+                if (m_doseListWidget->viewport())
+                  m_doseListWidget->viewport()->update();
+              });
+            });
+    connect(widget, &DoseItemWidget::settingsChanged, this, [this]() {
+      m_resampledDose.clear();
+      m_doseLoaded = false;
+      updateColorBars();
+      updateImage();
+    });
+    connect(widget, &DoseItemWidget::visibilityChanged, this,
+            [this](bool) {
+              onDoseCalculateClicked();
+              updateDoseShiftLabels();
+            });
+
+    // Connect save button
+    connect(widget, &DoseItemWidget::saveRequested, this, [this, widget]() {
+      onDoseSaveRequested(widget);
+    });
+  }
+
+  DoseItem newItem;
+  newItem.volume = result.volume;
+  newItem.widget = widget;
+  newItem.dose = result.dose;
+  // isSaved=false by default (newly calculated)
+  m_doseItems.push_back(std::move(newItem));
+
+  m_resampledDose = result.volume;
+  m_doseLoaded = true;
+  qDebug() << "CyberKnife: Dose calculation complete, m_doseItems.size =" << m_doseItems.size();
+  resetDoseRange();
+  if (m_doseRefSpinBox) {
+    double maxDose = m_resampledDose.maxDose();
+    m_doseRefSpinBox->setValue(maxDose);
+    m_doseReference = maxDose;
+  }
+
+  // Calculate and display dose immediately after calculation
+  onDoseCalculateClicked();
+  updateImageInfo();
+  updateDoseShiftLabels();
+  updateCyberKnifeUiState();
+}
+
+void DicomViewer::onCyberKnifeCancelClicked() {
+  if (!m_cyberknifeCalculating)
+    return;
+
+  // Set cancellation flag (will be checked by dose calculator between passes)
+  m_cyberknifeCancelRequested.store(true);
+
+  // Update UI to show cancellation in progress
+  if (m_cyberknifeStatusLabel) {
+    m_cyberknifeStatusLabel->setText(tr("Cancelling..."));
+    m_cyberknifeStatusLabel->setVisible(true);
+  }
+
+  if (m_cyberknifeCancelButton) {
+    m_cyberknifeCancelButton->setEnabled(false);
+  }
+
+  // Note: The calculation thread will detect the cancellation flag and exit
+  // Cleanup will happen in onCyberKnifeDoseCalculationFinished()
+}
+
+void DicomViewer::onReadBrachyPlan() {
+  QString filename = QFileDialog::getOpenFileName(
+      this, tr("Open Brachy RT Plan"), QDir::homePath(),
+      tr("DICOM Files (*.dcm *.DCM *.dicom *.DICOM);;All Files (*.*)"));
+  if (!filename.isEmpty()) {
+    if (!loadBrachyPlanFile(filename)) {
+      QMessageBox::warning(
+          this, tr("Error"),
+          QString("Failed to load RT Plan file:\n%1").arg(filename));
+    } else {
+      // Try to auto-load Ir source data if not already loaded
+      if (!m_brachyDoseCalc || !m_brachyDoseCalc->isInitialized()) {
+        QSettings settings("ShioRIS3", "ShioRIS3");
+        QString savedPath = settings.value("Brachy/IrSourceDataPath").toString();
+        if (!savedPath.isEmpty() && QFile::exists(savedPath)) {
+          qDebug() << "RT-Plan loaded, auto-loading Ir source data...";
+          loadBrachySourceData(savedPath);
+        }
+      }
+
+      // Update Calculate button state
+      bool canCalculate = m_brachyLoaded && m_brachyDoseCalc &&
+                         m_brachyDoseCalc->isInitialized();
+      if (m_brachyCalcDoseButton) {
+        m_brachyCalcDoseButton->setEnabled(canCalculate);
+      }
+    }
+  }
+}
+
+void DicomViewer::onLoadBrachyData() {
+  QString filename = QFileDialog::getOpenFileName(
+      this, tr("Open Ir Source Data"), QDir::homePath(),
+      tr("Binary Files (*.bin *.dat);;All Files (*.*)"));
+
+  if (filename.isEmpty()) {
+    return;
+  }
+
+  if (loadBrachySourceData(filename)) {
+    QMessageBox::information(this, tr("Success"),
+                            tr("Ir source data loaded successfully"));
+  } else {
+    QMessageBox::warning(this, tr("Error"),
+                        tr("Failed to load Ir source data from:\n%1").arg(filename));
+  }
+}
+
+bool DicomViewer::loadBrachySourceData(const QString &filename) {
+  // Initialize calculator if needed
+  if (!m_brachyDoseCalc) {
+    m_brachyDoseCalc = std::make_unique<Brachy::BrachyDoseCalculator>();
+  }
+
+  // Load source data
+  bool success = m_brachyDoseCalc->initialize(filename);
+
+  if (success) {
+    // Save path to settings for auto-load next time
+    QSettings settings("ShioRIS3", "ShioRIS3");
+    settings.setValue("Brachy/IrSourceDataPath", filename);
+
+    if (m_brachyDataStatus) {
+      QString displayText = tr("✓ Ir source data loaded\n"
+                              "File: %1\n"
+                              "Path: %2")
+                              .arg(QFileInfo(filename).fileName())
+                              .arg(QDir::toNativeSeparators(filename));
+      m_brachyDataStatus->setText(displayText);
+      setBrachyStatusStyle(QStringLiteral("#00ff00"));
+    }
+
+    // Enable Calculate button if plan is also loaded
+    bool canCalculate = m_brachyLoaded && m_brachyDoseCalc->isInitialized();
+    if (m_brachyCalcDoseButton) {
+      m_brachyCalcDoseButton->setEnabled(canCalculate);
+    }
+
+    qDebug() << "Ir source data loaded and saved to settings:" << filename;
+    return true;
+  } else {
+    if (m_brachyDataStatus) {
+      m_brachyDataStatus->setText(tr("✗ Failed to load source data\nPath: %1")
+                                   .arg(QDir::toNativeSeparators(filename)));
+      setBrachyStatusStyle(QStringLiteral("#ff0000"));
+    }
+
+    qWarning() << "Failed to load Ir source data from:" << filename;
+    return false;
+  }
+}
+
+void DicomViewer::autoLoadBrachySourceData() {
+  QSettings settings("ShioRIS3", "ShioRIS3");
+  QString savedPath = settings.value("Brachy/IrSourceDataPath").toString();
+
+  if (!savedPath.isEmpty() && QFile::exists(savedPath)) {
+    qDebug() << "Auto-loading Ir source data from:" << savedPath;
+
+    if (loadBrachySourceData(savedPath)) {
+      qDebug() << "Auto-load successful";
+      if (m_brachyDataStatus) {
+        // Update status to show it was auto-loaded
+        QString currentText = m_brachyDataStatus->text();
+        m_brachyDataStatus->setText(currentText + tr("\n(Auto-loaded on startup)"));
+      }
+    } else {
+      qDebug() << "Auto-load failed, user can manually load if needed";
+      if (m_brachyDataStatus) {
+        m_brachyDataStatus->setText(tr("⚠ Auto-load failed\n"
+                                      "Previous file: %1\n"
+                                      "Please load source data manually")
+                                     .arg(QFileInfo(savedPath).fileName()));
+        setBrachyStatusStyle(QStringLiteral("#ffaa00"));
+      }
+    }
+  } else {
+    qDebug() << "No saved Ir source data path or file not found";
+    if (m_brachyDataStatus && !savedPath.isEmpty()) {
+      // File path was saved but file no longer exists
+      m_brachyDataStatus->setText(tr("⚠ Previously saved file not found\n"
+                                    "Path: %1\n"
+                                    "Please load source data")
+                                   .arg(QDir::toNativeSeparators(savedPath)));
+      setBrachyStatusStyle(QStringLiteral("#ffaa00"));
+    }
+  }
+}
+
+void DicomViewer::onCalculateBrachyDose() {
+  if (!m_brachyDoseCalc || !m_brachyDoseCalc->isInitialized()) {
+    QMessageBox::warning(this, tr("Error"),
+                        tr("Please load Ir source data first"));
+    return;
+  }
+
+  if (!m_brachyLoaded || m_brachyPlan.sources().isEmpty()) {
+    QMessageBox::warning(this, tr("Error"),
+                        tr("Please load RT-Plan first"));
+    return;
+  }
+
+  // Get voxel size
+  double voxelSize = 2.0;
+  if (m_brachyVoxelSizeSpinBox) {
+    voxelSize = m_brachyVoxelSizeSpinBox->value();
+  }
+
+  // Disable button and show progress
+  if (m_brachyCalcDoseButton) {
+    m_brachyCalcDoseButton->setEnabled(false);
+  }
+  if (m_brachyProgressBar) {
+    m_brachyProgressBar->setVisible(true);
+    m_brachyProgressBar->setRange(0, 100);
+    m_brachyProgressBar->setValue(0);
+  }
+
+  // Set CT volume for the calculator (optional)
+  if (isVolumeLoaded()) {
+    m_brachyDoseCalc->setCtVolume(&m_volume);
+  }
+
+  // IMPORTANT: Dose calculation does NOT modify dwell times
+  // It uses the current dwell times from the plan to calculate dose distribution only
+  // Dwell times are only modified when user explicitly clicks "Optimize Dwell Times" button
+
+  // Capture a copy of the current brachy plan to ensure thread safety
+  // This guarantees that the dose calculation uses the current dwell times
+  // even if m_brachyPlan is modified on the main thread while calculation is running
+  BrachyPlan planCopy = m_brachyPlan;
+
+  // Calculate dose in a separate thread with exception handling
+  // NOTE: This is PURE dose calculation - no optimization is performed here
+  QFuture<BrachyDoseResult> future = QtConcurrent::run([this, voxelSize, planCopy]() -> BrachyDoseResult {
+    BrachyDoseResult result;
+    try {
+      auto progressCallback = [this](int current, int total) {
+        int percent = (current * 100) / total;
+        QMetaObject::invokeMethod(this, [this, percent]() {
+          if (m_brachyProgressBar) {
+            m_brachyProgressBar->setValue(percent);
+          }
+        }, Qt::QueuedConnection);
+      };
+
+      qDebug() << "Starting brachytherapy dose calculation...";
+      qDebug() << "NOTE: Dose calculation ONLY - dwell times will NOT be modified";
+      qDebug() << "Using plan with" << planCopy.sources().size() << "sources";
+
+      // Calculate normalization factor from reference points
+      // This is just a scaling factor for dose display, does NOT change dwell times
+      double normalizationFactor = m_brachyDoseCalc->calculateNormalizationFactor(planCopy);
+
+      // Calculate dose with normalization
+      // This calculates dose distribution using CURRENT dwell times (unchanged)
+      RTDoseVolume doseVolume = m_brachyDoseCalc->calculateVolumeDoseNormalized(
+          planCopy, normalizationFactor, voxelSize, {}, progressCallback);
+
+      qDebug() << "Dose calculation returned. Dimensions:"
+               << doseVolume.width() << "x" << doseVolume.height() << "x" << doseVolume.depth();
+
+      if (doseVolume.width() > 0 && doseVolume.height() > 0 && doseVolume.depth() > 0) {
+        result.success = true;
+        result.dose = std::move(doseVolume);
+        result.normalizationFactor = normalizationFactor;
+        qDebug() << "Dose calculation successful. Max dose:" << result.dose.maxDose();
+
+        // Verify reference point doses
+        result.referencePointErrors = m_brachyDoseCalc->verifyReferencePointDoses(
+            planCopy, normalizationFactor);
+
+        if (!result.referencePointErrors.isEmpty()) {
+          qDebug() << "\n=== Reference Point Dose Error Summary ===";
+          for (const auto &error : result.referencePointErrors) {
+            qDebug() << QString("%1: Prescribed=%2 Gy, Calculated=%3 Gy, Error=%4 Gy (%5%)")
+                          .arg(error.label)
+                          .arg(error.prescribedDose, 0, 'f', 3)
+                          .arg(error.calculatedDose, 0, 'f', 3)
+                          .arg(error.absoluteError, 0, 'f', 3)
+                          .arg(error.relativeError, 0, 'f', 2);
+          }
+          qDebug() << "==========================================\n";
+        }
+      } else {
+        result.success = false;
+        result.errorMessage = "Invalid dose volume dimensions";
+        qWarning() << result.errorMessage;
+      }
+    } catch (const std::exception &e) {
+      result.success = false;
+      result.errorMessage = QString("Exception during dose calculation: %1").arg(e.what());
+      qWarning() << result.errorMessage;
+    } catch (...) {
+      result.success = false;
+      result.errorMessage = "Unknown exception during dose calculation";
+      qWarning() << result.errorMessage;
+    }
+    return result;
+  });
+
+  // Watch for completion
+  auto *watcher = new QFutureWatcher<BrachyDoseResult>(this);
+  connect(watcher, &QFutureWatcher<BrachyDoseResult>::finished, this, [this, watcher]() {
+    BrachyDoseResult result = watcher->result();
+    watcher->deleteLater();
+
+    // Hide progress
+    if (m_brachyProgressBar) {
+      m_brachyProgressBar->setVisible(false);
+    }
+
+    // Re-enable button
+    if (m_brachyCalcDoseButton) {
+      m_brachyCalcDoseButton->setEnabled(true);
+    }
+
+    // Check if calculation succeeded
+    if (!result.success) {
+      QMessageBox::warning(this, tr("Error"),
+                          tr("Dose calculation failed:\n%1").arg(result.errorMessage));
+      return;
+    }
+
+    RTDoseVolume doseVolume = std::move(result.dose);
+    qDebug() << "Brachy dose volume dimensions:" << doseVolume.width()
+             << "x" << doseVolume.height() << "x" << doseVolume.depth();
+    qDebug() << "Max dose:" << doseVolume.maxDose() << "Gy";
+
+    // Update reference points display with error information if available
+    if (!result.referencePointErrors.isEmpty()) {
+      updateReferencePointsDisplay(result.referencePointErrors);
+    }
+
+    // Load the dose volume
+    QString label = tr("Brachy Dose");
+    DoseResampledVolume resampledDose;
+
+    if (isVolumeLoaded()) {
+      // Resample dose to CT grid
+      qDebug() << "Resampling dose to CT grid...";
+      bool resampleOk = resampledDose.resampleFromRTDose(
+          m_volume, doseVolume,
+          nullptr,  // no progress callback needed here
+          true      // use native dose geometry
+      );
+
+      if (!resampleOk) {
+        QMessageBox::warning(this, tr("Error"),
+                            tr("Failed to resample dose to CT grid"));
+        return;
+      }
+      qDebug() << "Resampling completed. Max dose:" << resampledDose.maxDose();
+    } else {
+      // No CT volume - use dose volume directly without resampling
+      qDebug() << "No CT volume, using dose directly";
+      cv::Mat doseCopy = doseVolume.data().clone();  // Deep copy
+      resampledDose.setFromMat(
+          doseCopy,
+          doseVolume.spacingX(),
+          doseVolume.spacingY(),
+          doseVolume.spacingZ(),
+          doseVolume.originX(),
+          doseVolume.originY(),
+          doseVolume.originZ()
+      );
+      resampledDose.updateMaxDose();
+      qDebug() << "Dose set directly. Max dose:" << resampledDose.maxDose();
+    }
+
+    // Add to dose list
+    if (m_doseItems.size() >= 5) {
+      QMessageBox::StandardButton reply = QMessageBox::question(
+          this, tr("Dose Limit"),
+          tr("Maximum 5 dose volumes. Replace oldest?"),
+          QMessageBox::Yes | QMessageBox::No);
+      if (reply == QMessageBox::No) {
+        return;
+      }
+      // Remove oldest
+      if (!m_doseItems.empty() && m_doseListWidget) {
+        delete m_doseListWidget->takeItem(0);
+        m_doseItems.erase(m_doseItems.begin());
+      }
+    } else {
+      m_doseItems.clear();
+    }
+
+    // Deactivate all existing dose items before adding new calculated dose
+    for (auto &doseItem : m_doseItems) {
+      if (doseItem.widget) {
+        doseItem.widget->setChecked(false);
+      }
+    }
+
+    DoseItemWidget *widget = nullptr;
+    QListWidgetItem *item = nullptr;
+    if (m_doseListWidget) {
+      item = new QListWidgetItem(m_doseListWidget);
+      widget = new DoseItemWidget(label, doseVolume.maxDose());
+      widget->setChecked(true);  // Ensure dose is checked by default
+      item->setSizeHint(widget->sizeHint());
+      m_doseListWidget->addItem(item);
+      m_doseListWidget->setItemWidget(item, widget);
+
+      connect(widget, &DoseItemWidget::uiExpandedChanged, this,
+              [this, item, widget]() {
+                QTimer::singleShot(0, this, [this, item, widget]() {
+                  if (!m_doseListWidget)
+                    return;
+                  widget->adjustSize();
+                  item->setSizeHint(widget->sizeHint());
+                  m_doseListWidget->setItemWidget(item, widget);
+                  m_doseListWidget->doItemsLayout();
+                  if (m_doseListWidget->viewport())
+                    m_doseListWidget->viewport()->update();
+                });
+              });
+      connect(widget, &DoseItemWidget::settingsChanged, this, [this]() {
+        m_resampledDose.clear();
+        m_doseLoaded = false;
+        updateColorBars();
+        updateImage();
+      });
+      connect(widget, &DoseItemWidget::visibilityChanged, this,
+              [this](bool) {
+                onDoseCalculateClicked();
+                updateDoseShiftLabels();
+              });
+
+      // Connect save button
+      connect(widget, &DoseItemWidget::saveRequested, this, [this, widget]() {
+        onDoseSaveRequested(widget);
+      });
+    }
+
+    DoseItem newItem;
+    newItem.volume = resampledDose;
+    newItem.widget = widget;
+    newItem.dose = doseVolume;
+    // isSaved=false by default (newly calculated)
+    m_doseItems.push_back(std::move(newItem));
+
+    m_resampledDose = resampledDose;
+    m_doseLoaded = true;
+    resetDoseRange();
+    if (m_doseRefSpinBox) {
+      double maxDose = m_resampledDose.maxDose();
+      m_doseRefSpinBox->setValue(maxDose);
+      m_doseReference = maxDose;
+    }
+
+    // Calculate and display dose immediately after calculation
+    onDoseCalculateClicked();
+    updateImageInfo();
+    updateDoseShiftLabels();
+
+    QMessageBox::information(this, tr("Success"),
+                            tr("Brachytherapy dose calculation completed\nMax dose: %1 Gy")
+                                .arg(doseVolume.maxDose(), 0, 'f', 2));
+  });
+
+  watcher->setFuture(future);
+}
+
+void DicomViewer::onGenerateRandomSources() {
+  if (!m_brachyDoseCalc || !m_brachyDoseCalc->isInitialized()) {
+    QMessageBox::warning(this, tr("Error"),
+                        tr("Please load Ir source data first"));
+    return;
+  }
+
+  // Confirm action
+  QMessageBox::StandardButton reply = QMessageBox::question(
+      this, tr("Generate Random Sources"),
+      tr("This will clear the current plan and generate 10 random sources.\n"
+         "Continue?"),
+      QMessageBox::Yes | QMessageBox::No);
+
+  if (reply == QMessageBox::No) {
+    return;
+  }
+
+  // Clear current plan
+  m_brachyPlan.clearSources();
+  m_brachyLoaded = false;
+
+  // Generate random sources
+  // Use smaller spatial range (±20mm) for better visualization
+  m_brachyPlan.generateRandomSources(
+      10,     // count
+      20.0,   // spatial range ±20mm (smaller for concentrated dose)
+      5.0,    // min dwell time
+      15.0    // max dwell time
+  );
+
+  // Update UI
+  m_brachyListWidget->clear();
+  m_brachyListWidget->addItems(m_brachyPlan.dwellTimeStrings());
+
+  // DEBUG: Log generated sources
+  qDebug() << "=== Generated" << m_brachyPlan.sources().size() << "random sources ===";
+  for (int i = 0; i < m_brachyPlan.sources().size() && i < 3; ++i) {
+    const auto &src = m_brachyPlan.sources()[i];
+    qDebug() << "Source" << i << ": pos=" << src.position()
+             << ", dir=" << src.direction()
+             << ", dwell=" << src.dwellTime() << "s";
+  }
+
+  // Set loaded flag
+  m_brachyLoaded = true;
+
+  // Enable calculate button
+  if (m_brachyCalcDoseButton) {
+    m_brachyCalcDoseButton->setEnabled(true);
+  }
+
+  // Refresh views to show source positions
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_viewContainers[i]->isVisible()) {
+      loadSlice(i, m_currentIndices[i]);
+    }
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_is3DView[i]) {
+      update3DView(i);
+    }
+  }
+
+  QMessageBox::information(this, tr("Success"),
+                          tr("Generated 10 random sources.\n"
+                             "Click 'Calculate Dose' to compute dose distribution."));
+}
+
+void DicomViewer::onGenerateTestSource() {
+  if (!m_brachyDoseCalc || !m_brachyDoseCalc->isInitialized()) {
+    QMessageBox::warning(this, tr("Error"),
+                        tr("Please load Ir source data first"));
+    return;
+  }
+
+  // Confirm action
+  QMessageBox::StandardButton reply = QMessageBox::question(
+      this, tr("Generate Test Source"),
+      tr("This will clear the current plan and generate a single test source at origin (0,0,0).\n"
+         "The dose distribution should be symmetric.\n"
+         "Continue?"),
+      QMessageBox::Yes | QMessageBox::No);
+
+  if (reply == QMessageBox::No) {
+    return;
+  }
+
+  // Generate test source at origin
+  m_brachyPlan.generateTestSourceAtOrigin();
+  m_brachyLoaded = true;
+
+  // Update UI
+  m_brachyListWidget->clear();
+  m_brachyListWidget->addItems(m_brachyPlan.dwellTimeStrings());
+
+  // Enable calculate button
+  if (m_brachyCalcDoseButton) {
+    m_brachyCalcDoseButton->setEnabled(true);
+  }
+
+  // Refresh views to show source position
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_viewContainers[i]->isVisible()) {
+      loadSlice(i, m_currentIndices[i]);
+    }
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_is3DView[i]) {
+      update3DView(i);
+    }
+  }
+
+  QMessageBox::information(this, tr("Success"),
+                          tr("Generated test source at origin (0,0,0) with Z-axis direction.\n"
+                             "Dose distribution should be symmetric (circular in XY plane).\n"
+                             "Click 'Calculate Dose' to verify alignment."));
+}
+
+void DicomViewer::onAddDoseEvaluationPoint() {
+  if (!isVolumeLoaded()) {
+    QMessageBox::warning(this, tr("Error"), tr("Please load a CT volume first"));
+    return;
+  }
+
+  // Get active view
+  int viewIndex = m_activeViewIndex;
+
+  // Use the last displayed patient coordinates from the coordinate label
+  QVector3D cursorPos = m_lastPatientCoordinates[viewIndex];
+
+  // Check if the position is valid (coordinates are being displayed)
+  if (std::isnan(cursorPos.x()) || std::isnan(cursorPos.y()) || std::isnan(cursorPos.z())) {
+    QMessageBox::warning(this, tr("Error"),
+                        tr("No coordinates available.\n"
+                           "Please move the mouse cursor over the image to see coordinates."));
+    return;
+  }
+
+  // Ask user for target dose
+  bool ok;
+  double targetDose = QInputDialog::getDouble(
+      this, tr("Target Dose"),
+      tr("Enter target dose at this point (Gy):"),
+      10.0,  // default value
+      0.0,   // min
+      1000.0, // max
+      2,     // decimals
+      &ok
+  );
+
+  if (!ok) {
+    return;
+  }
+
+  // Ask for weight (optional)
+  double weight = QInputDialog::getDouble(
+      this, tr("Point Weight"),
+      tr("Enter optimization weight for this point:"),
+      1.0,   // default
+      0.01,  // min
+      100.0, // max
+      2,     // decimals
+      &ok
+  );
+
+  if (!ok) {
+    weight = 1.0;
+  }
+
+  // Create evaluation point
+  DoseEvaluationPoint point(cursorPos, targetDose, weight);
+  point.setLabel(QString("Point %1").arg(m_brachyPlan.evaluationPoints().size() + 1));
+
+  // Add to plan
+  m_brachyPlan.addEvaluationPoint(point);
+
+  // Update UI
+  QString itemText = QString("%1: (%2, %3, %4) - Target: %5 Gy, Weight: %6")
+                        .arg(point.label())
+                        .arg(cursorPos.x(), 0, 'f', 1)
+                        .arg(cursorPos.y(), 0, 'f', 1)
+                        .arg(cursorPos.z(), 0, 'f', 1)
+                        .arg(targetDose, 0, 'f', 2)
+                        .arg(weight, 0, 'f', 2);
+  m_brachyEvalPointsList->addItem(itemText);
+
+  // Enable optimize button if we have sources
+  if (m_brachyLoaded && m_brachyPlan.sources().size() > 0) {
+    m_brachyOptimizeButton->setEnabled(true);
+  }
+
+  qDebug() << "Added dose evaluation point:" << itemText;
+}
+
+void DicomViewer::onClearDoseEvaluationPoints() {
+  m_brachyPlan.clearEvaluationPoints();
+  m_brachyEvalPointsList->clear();
+  m_brachyOptimizeButton->setEnabled(false);
+  qDebug() << "Cleared all dose evaluation points";
+}
+
+void DicomViewer::onOptimizeDwellTimes() {
+  // IMPORTANT: This function is ONLY called when user explicitly clicks "Optimize Dwell Times" button
+  // It WILL modify the dwell times to achieve target doses at evaluation points
+  // WARNING: This optimization does NOT preserve original dwell time ratios
+  //          Each source's dwell time is independently optimized
+
+  if (!m_brachyLoaded || m_brachyPlan.sources().isEmpty()) {
+    QMessageBox::warning(this, tr("Error"), tr("Please load a brachytherapy plan first"));
+    return;
+  }
+
+  if (m_brachyPlan.evaluationPoints().isEmpty()) {
+    QMessageBox::warning(this, tr("Error"), tr("Please add dose evaluation points first"));
+    return;
+  }
+
+  if (!m_brachyDoseCalc || !m_brachyDoseCalc->isInitialized()) {
+    QMessageBox::warning(this, tr("Error"), tr("Please load Ir source data first"));
+    return;
+  }
+
+  // Create optimizer if not exists
+  if (!m_brachyOptimizer) {
+    m_brachyOptimizer = std::make_unique<Brachy::DwellTimeOptimizer>(m_brachyDoseCalc.get());
+  }
+
+  // Set up optimization settings
+  Brachy::DwellTimeOptimizer::OptimizationSettings settings;
+  settings.maxIterations = m_brachyOptimizationIterations->value();
+  settings.convergenceTolerance = m_brachyOptimizationTolerance->value();
+  settings.minDwellTime = 0.0;
+  settings.maxDwellTime = 100.0;
+  settings.learningRate = 0.5;
+
+  // Set progress callback
+  m_brachyOptimizer->setProgressCallback([this](int iter, int maxIter, double error) {
+    // Update progress bar
+    m_brachyProgressBar->setVisible(true);
+    m_brachyProgressBar->setRange(0, maxIter);
+    m_brachyProgressBar->setValue(iter);
+    QApplication::processEvents();
+  });
+
+  // Disable buttons during optimization
+  m_brachyOptimizeButton->setEnabled(false);
+  m_brachyCalcDoseButton->setEnabled(false);
+
+  // Run optimization
+  qDebug() << "Starting dwell time optimization...";
+  auto result = m_brachyOptimizer->optimize(m_brachyPlan, m_brachyPlan.evaluationPoints(), settings);
+
+  // Hide progress bar
+  m_brachyProgressBar->setVisible(false);
+
+  // Re-enable buttons
+  m_brachyOptimizeButton->setEnabled(true);
+  if (m_brachyDoseCalc && m_brachyDoseCalc->isInitialized()) {
+    m_brachyCalcDoseButton->setEnabled(true);
+  }
+
+  // Check result
+  if (!result.converged && result.iterations >= settings.maxIterations) {
+    QMessageBox::warning(this, tr("Optimization"),
+                        tr("Optimization did not converge within maximum iterations.\n"
+                           "Initial error: %1 Gy\n"
+                           "Final error: %2 Gy\n"
+                           "Consider increasing max iterations or adjusting tolerance.")
+                        .arg(result.initialError, 0, 'f', 4)
+                        .arg(result.finalError, 0, 'f', 4));
+  } else {
+    QMessageBox::information(this, tr("Optimization Complete"),
+                            tr("Dwell time optimization completed successfully!\n\n"
+                               "Iterations: %1\n"
+                               "Initial RMS error: %2 Gy\n"
+                               "Final RMS error: %3 Gy\n"
+                               "Improvement: %4 Gy")
+                            .arg(result.iterations)
+                            .arg(result.initialError, 0, 'f', 4)
+                            .arg(result.finalError, 0, 'f', 4)
+                            .arg(result.initialError - result.finalError, 0, 'f', 4));
+  }
+
+  // Update plan with optimized dwell times
+  qDebug() << "=== Updating Plan with Optimized Dwell Times ===";
+  qDebug() << "Number of optimized dwell times:" << result.optimizedDwellTimes.size();
+  for (int i = 0; i < qMin(10, result.optimizedDwellTimes.size()); ++i) {
+    qDebug() << QString("  Optimized dwell time [%1] = %2 s").arg(i).arg(result.optimizedDwellTimes[i], 0, 'f', 3);
+  }
+  if (result.optimizedDwellTimes.size() > 10) {
+    qDebug() << QString("  ... (%1 more dwell times)").arg(result.optimizedDwellTimes.size() - 10);
+  }
+  m_brachyPlan.setDwellTimes(result.optimizedDwellTimes);
+  qDebug() << "Dwell times updated in plan";
+  qDebug() << "==============================================";
+
+  // Update UI to show new dwell times
+  m_brachyListWidget->clear();
+  m_brachyListWidget->addItems(m_brachyPlan.dwellTimeStrings());
+
+  // Update evaluation points list with calculated doses
+  auto updatedPoints = m_brachyOptimizer->calculateDosesAtPoints(
+      m_brachyPlan, result.optimizedDwellTimes, m_brachyPlan.evaluationPoints());
+
+  m_brachyEvalPointsList->clear();
+  for (int i = 0; i < updatedPoints.size(); ++i) {
+    const auto& pt = updatedPoints[i];
+    QString itemText = QString("%1: (%2, %3, %4) - Target: %5 Gy, Calculated: %6 Gy (Error: %7%)")
+                          .arg(pt.label())
+                          .arg(pt.position().x(), 0, 'f', 1)
+                          .arg(pt.position().y(), 0, 'f', 1)
+                          .arg(pt.position().z(), 0, 'f', 1)
+                          .arg(pt.targetDose(), 0, 'f', 2)
+                          .arg(pt.calculatedDose(), 0, 'f', 2)
+                          .arg(pt.relativeError() * 100.0, 0, 'f', 1);
+    m_brachyEvalPointsList->addItem(itemText);
+  }
+
+  qDebug() << "Dwell time optimization complete";
+}
+
+void DicomViewer::updateReferencePointsDisplay(
+    const QVector<Brachy::ReferencePointError> &errors) {
+  if (!m_brachyRefPointsList) {
+    return;
+  }
+
+  m_brachyRefPointsList->clear();
+
+  if (!m_brachyLoaded) {
+    return;
+  }
+
+  const auto& refPoints = m_brachyPlan.referencePoints();
+  if (refPoints.isEmpty()) {
+    m_brachyRefPointsList->addItem(tr("(No reference points in plan)"));
+    return;
+  }
+
+  // Check if we have error information
+  bool hasErrors = !errors.isEmpty() && errors.size() == refPoints.size();
+
+  for (int i = 0; i < refPoints.size(); ++i) {
+    const auto& rp = refPoints[i];
+
+    // Always display basic information: coordinates and prescribed dose
+    QString itemText = QString("Ref %1: (%2, %3, %4) - %5 Gy")
+                          .arg(i + 1)
+                          .arg(rp.position.x(), 0, 'f', 1)
+                          .arg(rp.position.y(), 0, 'f', 1)
+                          .arg(rp.position.z(), 0, 'f', 1)
+                          .arg(rp.prescribedDose, 0, 'f', 2);
+
+    if (!rp.label.isEmpty()) {
+      itemText += QString(" [%1]").arg(rp.label);
+    }
+
+    // Append error information if available
+    if (hasErrors) {
+      const auto& error = errors[i];
+      itemText += QString(" | Calc=%1 Gy, Err=%2 Gy (%3%)")
+                      .arg(error.calculatedDose, 0, 'f', 2)
+                      .arg(error.absoluteError, 0, 'f', 3)
+                      .arg(error.relativeError, 0, 'f', 1);
+    }
+
+    m_brachyRefPointsList->addItem(itemText);
+  }
+
+  qDebug() << "Reference points display updated:" << refPoints.size() << "points"
+           << (hasErrors ? "with error info" : "without error info");
+}
+
+void DicomViewer::showReferencePointErrorDialog(
+    const QVector<Brachy::ReferencePointError> &errors,
+    double normalizationFactor) {
+
+  // Create dialog
+  QDialog *dialog = new QDialog(this);
+  dialog->setWindowTitle(tr("Reference Point Dose Verification"));
+  dialog->resize(900, 400);
+
+  QVBoxLayout *layout = new QVBoxLayout(dialog);
+
+  // Add information label
+  QLabel *infoLabel = new QLabel(
+      tr("Normalization factor: %1\n"
+         "Dose values after normalization:").arg(normalizationFactor, 0, 'f', 6),
+      dialog);
+  layout->addWidget(infoLabel);
+
+  // Create table widget
+  QTableWidget *table = new QTableWidget(dialog);
+  table->setColumnCount(6);
+  table->setRowCount(errors.size());
+
+  // Set headers
+  QStringList headers;
+  headers << tr("Label") << tr("Position (mm)") << tr("Prescribed (Gy)")
+          << tr("Calculated (Gy)") << tr("Abs Error (Gy)") << tr("Rel Error (%)");
+  table->setHorizontalHeaderLabels(headers);
+
+  // Populate table
+  for (int i = 0; i < errors.size(); ++i) {
+    const auto &error = errors[i];
+
+    // Label
+    QTableWidgetItem *labelItem = new QTableWidgetItem(error.label);
+    labelItem->setFlags(labelItem->flags() & ~Qt::ItemIsEditable);
+    table->setItem(i, 0, labelItem);
+
+    // Position
+    QString posStr = QString("(%1, %2, %3)")
+                         .arg(error.position.x(), 0, 'f', 1)
+                         .arg(error.position.y(), 0, 'f', 1)
+                         .arg(error.position.z(), 0, 'f', 1);
+    QTableWidgetItem *posItem = new QTableWidgetItem(posStr);
+    posItem->setFlags(posItem->flags() & ~Qt::ItemIsEditable);
+    table->setItem(i, 1, posItem);
+
+    // Prescribed dose
+    QTableWidgetItem *prescribedItem = new QTableWidgetItem(
+        QString::number(error.prescribedDose, 'f', 3));
+    prescribedItem->setFlags(prescribedItem->flags() & ~Qt::ItemIsEditable);
+    table->setItem(i, 2, prescribedItem);
+
+    // Calculated dose
+    QTableWidgetItem *calculatedItem = new QTableWidgetItem(
+        QString::number(error.calculatedDose, 'f', 3));
+    calculatedItem->setFlags(calculatedItem->flags() & ~Qt::ItemIsEditable);
+    table->setItem(i, 3, calculatedItem);
+
+    // Absolute error
+    QTableWidgetItem *absErrorItem = new QTableWidgetItem(
+        QString::number(error.absoluteError, 'f', 4));
+    absErrorItem->setFlags(absErrorItem->flags() & ~Qt::ItemIsEditable);
+    // Color code based on error magnitude
+    if (std::abs(error.absoluteError) > 0.1) {
+      absErrorItem->setBackground(QBrush(QColor(255, 200, 200))); // Light red
+    } else if (std::abs(error.absoluteError) > 0.05) {
+      absErrorItem->setBackground(QBrush(QColor(255, 255, 200))); // Light yellow
+    } else {
+      absErrorItem->setBackground(QBrush(QColor(200, 255, 200))); // Light green
+    }
+    table->setItem(i, 4, absErrorItem);
+
+    // Relative error
+    QTableWidgetItem *relErrorItem = new QTableWidgetItem(
+        QString::number(error.relativeError, 'f', 2));
+    relErrorItem->setFlags(relErrorItem->flags() & ~Qt::ItemIsEditable);
+    // Color code based on error percentage
+    if (std::abs(error.relativeError) > 2.0) {
+      relErrorItem->setBackground(QBrush(QColor(255, 200, 200))); // Light red
+    } else if (std::abs(error.relativeError) > 1.0) {
+      relErrorItem->setBackground(QBrush(QColor(255, 255, 200))); // Light yellow
+    } else {
+      relErrorItem->setBackground(QBrush(QColor(200, 255, 200))); // Light green
+    }
+    table->setItem(i, 5, relErrorItem);
+  }
+
+  // Adjust column widths
+  table->resizeColumnsToContents();
+  table->horizontalHeader()->setStretchLastSection(true);
+
+  layout->addWidget(table);
+
+  // Add close button
+  QPushButton *closeButton = new QPushButton(tr("Close"), dialog);
+  connect(closeButton, &QPushButton::clicked, dialog, &QDialog::accept);
+  layout->addWidget(closeButton);
+
+  // Show dialog
+  dialog->exec();
+  dialog->deleteLater();
+}
+
+void DicomViewer::onShowRefPointsChanged(int state) {
+  // Update visualization when checkbox state changes
+  bool show = (state == Qt::Checked);
+
+  // Update all visible views
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_viewContainers[i]->isVisible()) {
+      if (m_is3DView[i]) {
+        update3DView(i);
+      } else {
+        loadSlice(i, m_currentIndices[i]);
+      }
+    }
+  }
+
+  qDebug() << "Reference points visualization:" << (show ? "enabled" : "disabled");
+}
+
+void DicomViewer::showNextImage() {
+  if (!isVolumeLoaded() && m_dicomFiles.isEmpty())
+    return;
+  int i = m_activeViewIndex; // アクティブビューのみ更新
+  int count = isVolumeLoaded() ? sliceCountForOrientation(m_viewOrientations[i])
+                               : m_dicomFiles.size();
+  if (i >= 0 && i < VIEW_COUNT && m_currentIndices[i] + 1 < count) {
+    loadSlice(i, m_currentIndices[i] + 1);
+    m_sliceSliders[i]->blockSignals(true);
+    m_sliceSliders[i]->setValue(m_currentIndices[i]);
+    m_sliceSliders[i]->blockSignals(false);
+    updateSliceLabels();
+  }
+}
+
+void DicomViewer::showPreviousImage() {
+  if (!isVolumeLoaded() && m_dicomFiles.isEmpty())
+    return;
+  int i = m_activeViewIndex; // アクティブビューのみ更新
+  int count = isVolumeLoaded() ? sliceCountForOrientation(m_viewOrientations[i])
+                               : m_dicomFiles.size();
+  if (i >= 0 && i < VIEW_COUNT && m_currentIndices[i] > 0) {
+    loadSlice(i, m_currentIndices[i] - 1);
+    m_sliceSliders[i]->blockSignals(true);
+    m_sliceSliders[i]->setValue(m_currentIndices[i]);
+    m_sliceSliders[i]->blockSignals(false);
+    updateSliceLabels();
+  }
+}
+
+void DicomViewer::clearImage() {
+  // Also reset study-level state to avoid stale DVH/RTSTRUCT tasks
+  resetStudyState();
+  clearFusionPreviewImage();
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_imageWidgets[i]->setImage(QImage());
+    m_imageWidgets[i]->setStructureLines(StructureLineList());
+    m_imageWidgets[i]->setStructurePoints(StructurePointList());
+    m_panOffsets[i] = QPointF(0.0, 0.0);
+    m_imageWidgets[i]->setPan(m_panOffsets[i]);
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_originalImages[i] = QImage();
+  }
+  m_volume = DicomVolume();
+  invalidateStructureSurfaceCache();
+  m_resampledDose.clear();
+  m_dicomFiles.clear();
+  m_ctFilename.clear();
+  m_rtDoseFilename.clear();
+  m_doseLoaded = false;
+  m_doseVisible = false;
+  if (m_doseListWidget) {
+    m_doseListWidget->clear();
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_currentIndices[i] = 0;
+    m_viewOrientations[i] = DicomVolume::Orientation::Axial;
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_sliceSliders[i]->blockSignals(true);
+    m_sliceSliders[i]->setRange(0, 0);
+    m_sliceSliders[i]->setValue(0);
+    m_sliceSliders[i]->setEnabled(false);
+    m_sliceSliders[i]->blockSignals(false);
+    m_sliceIndexLabels[i]->hide();
+    m_infoOverlays[i]->hide();
+    if (m_coordLabels[i])
+      m_coordLabels[i]->hide();
+    if (m_cursorDoseLabels[i])
+      m_cursorDoseLabels[i]->hide();
+    m_imageWidgets[i]->clearCursorCross();
+  }
+
+  // 情報をクリア
+  m_infoTextBox->setPlainText("Patient: -\n"
+                              "Modality: -\n"
+                              "Study Date: -\n"
+                              "Size: -\n"
+                              "Study Desc: -\n"
+                              "Slice Thk: -\n"
+                              "Pixel Spacing: - x -\n"
+                              "CT File: -\n\n"
+                              "RT Dose: Not Loaded");
+
+  m_imageSeriesDirs.clear();
+  m_imageSeriesModalities.clear();
+  m_activeImageSeriesIndex = 0;
+  m_primaryImageSeriesIndex = 0;
+  m_seriesVolumeCache.clear();
+  m_seriesWindowValues.clear();
+  m_seriesLevelValues.clear();
+  m_seriesWindowLevelInitialized.clear();
+  updateImageSeriesButtons();
+  updateSliderPosition();
+
+  // Reset brachytherapy data
+  m_brachyPlan.clearSources();
+  m_brachyPlan.clearEvaluationPoints();
+  m_brachyPlan.clearReferencePoints();
+  m_brachyLoaded = false;
+  if (m_brachyListWidget) {
+    m_brachyListWidget->clear();
+  }
+  if (m_brachyEvalPointsList) {
+    m_brachyEvalPointsList->clear();
+  }
+  if (m_brachyRefPointsList) {
+    m_brachyRefPointsList->clear();
+  }
+  if (m_brachyProgressBar) {
+    m_brachyProgressBar->setVisible(false);
+    m_brachyProgressBar->setValue(0);
+  }
+
+  // Reset dose volume and shift
+  m_doseVolume = RTDoseVolume();
+  m_doseShift = QVector3D(0.0, 0.0, 0.0);
+
+  // Reset CyberKnife data
+  m_cyberknifeBeamGeometries.clear();
+  m_cyberknifeBeamWeights.clear();
+  m_cyberknifePlanDensityModel = CyberKnifePlanDensityModelInfo();
+
+  // Cancel and clear any pending CyberKnife dose calculation
+  if (m_cyberknifeDoseWatcher) {
+    m_cyberknifeCancelRequested = true;
+    m_cyberknifeDoseWatcher->disconnect(this);
+    m_cyberknifeDoseWatcher->deleteLater();
+    m_cyberknifeDoseWatcher = nullptr;
+  }
+  m_cyberknifeCalculating = false;
+  m_cyberknifeCancelRequested = false;
+
+  // Clear CyberKnife UI text boxes and progress indicators
+  if (m_cyberknifeTextBox) {
+    m_cyberknifeTextBox->clear();
+  }
+  if (m_cyberknifeOcrTextBox) {
+    m_cyberknifeOcrTextBox->clear();
+  }
+  if (m_cyberknifeDensityTextBox) {
+    m_cyberknifeDensityTextBox->clear();
+  }
+  if (m_cyberknifeProgressBar) {
+    m_cyberknifeProgressBar->setVisible(false);
+    m_cyberknifeProgressBar->setValue(0);
+  }
+  if (m_cyberknifeStatusLabel) {
+    m_cyberknifeStatusLabel->clear();
+  }
+
+#ifdef USE_ONNXRUNTIME
+  // Reset segmentation data
+  m_segmentationVolume = cv::Mat();
+  m_segmentationReady = false;
+  m_visibleSegLabels.clear();
+  if (m_segLabelList) {
+    m_segLabelList->clear();
+  }
+#endif
+
+  // Reset 3D view widgets and profile widgets
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_3dWidgets[i]) {
+      // Clear all 3D visualization data
+      m_3dWidgets[i]->setStructureLines(StructureLine3DList());
+      m_3dWidgets[i]->setActiveSourcePoints(QVector<QVector3D>());
+      m_3dWidgets[i]->setInactiveSourcePoints(QVector<QVector3D>());
+      m_3dWidgets[i]->setActiveSourceSegments(QVector<QPair<QVector3D, QVector3D>>());
+      m_3dWidgets[i]->setInactiveSourceSegments(QVector<QPair<QVector3D, QVector3D>>());
+      m_3dWidgets[i]->setDoseIsosurfaces(QVector<DoseIsosurface>());
+      m_3dWidgets[i]->setStructureSurfaces(QVector<StructureSurface>());
+      // Reset slices to empty images
+      m_3dWidgets[i]->setSlices(QImage(), 0, QImage(), 0, QImage(), 0,
+                                 1, 1, 1, 1.0, 1.0, 1.0);
+    }
+    if (m_profileWidgets[i]) {
+      // Clear all dose profile data
+      m_profileWidgets[i]->setROINames(QStringList());
+      m_profileWidgets[i]->setDicomData(nullptr, nullptr, nullptr);
+      m_profileWidgets[i]->setProfile(QVector<double>(), QVector<double>(),
+                                       QVector<DoseProfileWindow::Segment>());
+    }
+  }
+
+  // Window/Level調整を停止
+  stopWindowLevelDrag();
+  updateColorBars();
+  updateCyberKnifeUiState();
+}
+
+void DicomViewer::resetStudyState() {
+  // Cancel and delete any pending DVH computations
+  if (!m_dvhWatchers.isEmpty()) {
+    for (auto it = m_dvhWatchers.begin(); it != m_dvhWatchers.end(); ++it) {
+      if (it.value()) {
+        // Disconnect to avoid invoking finished handlers for old study
+        it.value()->disconnect(this);
+        it.value()->deleteLater();
+      }
+    }
+    m_dvhWatchers.clear();
+  }
+
+  // Clear DVH data and reset widgets
+  m_dvhData.clear();
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_dvhWidgets[i]) {
+      // Clear ROI list and plotted data
+      m_dvhWidgets[i]->setROINames(QStringList());
+      m_dvhWidgets[i]->setDVHData({});
+      m_dvhWidgets[i]->setPatientInfo(QString());
+      m_dvhWidgets[i]->setPrescriptionDose(0.0);
+    }
+  }
+
+  // Reset RTSTRUCT and related UI lists
+  m_rtstruct = RTStructureSet();
+  m_rtstructLoaded = false;
+  m_lastRtStructPath.clear();
+  invalidateStructureSurfaceCache();
+  if (m_structureList) {
+    m_structureList->clear();
+  }
+
+  // Reset dose items list and flags; resampled dose will be reset by callers
+  if (m_doseListWidget) {
+    m_doseListWidget->clear();
+  }
+  m_doseItems.clear();
+
+  m_showDoseGuide = false;
+  if (m_doseGuideCheck) {
+    QSignalBlocker blocker(m_doseGuideCheck);
+    m_doseGuideCheck->setChecked(false);
+  }
+  updateCyberKnifeUiState();
+  if (!m_aiSuppressSourceTracking) {
+    m_aiHasDicomSource = false;
+    m_aiCurrentDicomSourceIsDirectory = false;
+    m_aiCurrentDicomSourcePath.clear();
+  }
+}
+
+void DicomViewer::onWindowChanged(int value) {
+  if (!m_windowLevelDragActive) {
+    m_windowSpinBox->setValue(value);
+    setWindowLevel(value, m_levelSlider->value());
+    emit windowLevelChanged(value, m_levelSlider->value());
+  }
+}
+
+void DicomViewer::onLevelChanged(int value) {
+  if (!m_windowLevelDragActive) {
+    m_levelSpinBox->setValue(value);
+    setWindowLevel(m_windowSlider->value(), value);
+    emit windowLevelChanged(m_windowSlider->value(), value);
+  }
+}
+
+void DicomViewer::onZoomIn() { setZoomFactor(m_zoomFactor * ZOOM_STEP); }
+
+void DicomViewer::onZoomOut() { setZoomFactor(m_zoomFactor / ZOOM_STEP); }
+
+void DicomViewer::onResetZoom() {
+  setZoomFactor(DEFAULT_ZOOM);
+
+  // 全ビューのパンをリセット
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_panOffsets[i] = QPointF(0.0, 0.0);
+    m_imageWidgets[i]->setPan(m_panOffsets[i]);
+  }
+}
+
+void DicomViewer::onFitToWindow() {
+  if (m_originalImages[0].isNull())
+    return;
+
+  QSize availableSize;
+  if (m_viewScrollAreas[m_activeViewIndex])
+    availableSize = m_viewScrollAreas[m_activeViewIndex]->viewport()->size();
+  else
+    availableSize = m_scrollArea->viewport()->size();
+  QSize imageSize = m_originalImages[m_activeViewIndex].size();
+
+  double scaleX =
+      static_cast<double>(availableSize.width()) / imageSize.width();
+  double scaleY =
+      static_cast<double>(availableSize.height()) / imageSize.height();
+
+  setZoomFactor(qMin(scaleX, scaleY));
+
+  // 全ビューのパンをリセット
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_panOffsets[i] = QPointF(0.0, 0.0);
+    m_imageWidgets[i]->setPan(m_panOffsets[i]);
+  }
+}
+
+void DicomViewer::onWindowLevelButtonClicked() {
+  if (m_windowLevelButton->isChecked()) {
+    // disable other modes
+    m_panButton->setChecked(false);
+    m_zoomButton->setChecked(false);
+    m_panMode = false;
+    m_zoomMode = false;
+    startWindowLevelDrag();
+  } else {
+    stopWindowLevelDrag();
+  }
+}
+
+void DicomViewer::onWindowLevelTimeout() { stopWindowLevelDrag(); }
+
+void DicomViewer::onPanTimeout() { m_panButton->setChecked(false); }
+
+void DicomViewer::onZoomTimeout() { m_zoomButton->setChecked(false); }
+
+void DicomViewer::onPanModeToggled(bool checked) {
+  if (checked) {
+    m_zoomButton->setChecked(false);
+    m_windowLevelButton->setChecked(false);
+    if (m_windowLevelDragActive)
+      stopWindowLevelDrag();
+    m_zoomMode = false;
+    m_panMode = true;
+    m_panTimer->start(WINDOW_LEVEL_TIMEOUT);
+    setCursor(Qt::OpenHandCursor);
+  } else {
+    m_panMode = false;
+    m_panDragActive = false;
+    m_rotationDragActive = false;
+    m_panTimer->stop();
+    if (!m_zoomMode && !m_windowLevelDragActive)
+      setCursor(Qt::ArrowCursor);
+  }
+  updateOverlayInteractionStates();
+}
+
+void DicomViewer::onZoomModeToggled(bool checked) {
+  if (checked) {
+    m_panButton->setChecked(false);
+    m_windowLevelButton->setChecked(false);
+    if (m_windowLevelDragActive)
+      stopWindowLevelDrag();
+    m_panMode = false;
+    m_zoomMode = true;
+    m_zoomTimer->start(WINDOW_LEVEL_TIMEOUT);
+    setCursor(Qt::OpenHandCursor);
+  } else {
+    m_zoomMode = false;
+    m_zoomDragActive = false;
+    m_rotationDragActive = false;
+    m_zoomTimer->stop();
+    if (!m_panMode && !m_windowLevelDragActive)
+      setCursor(Qt::ArrowCursor);
+  }
+  updateOverlayInteractionStates();
+}
+
+void DicomViewer::wheelEvent(QWheelEvent *event) {
+  if (m_structureList && m_structureList->hasFocus()) {
+    event->accept();
+    return;
+  }
+  if (m_zoomMode) {
+    const double scaleFactor = 1.15;
+    if (event->angleDelta().y() > 0)
+      setZoomFactor(m_zoomFactor * scaleFactor);
+    else
+      setZoomFactor(m_zoomFactor / scaleFactor);
+    m_zoomTimer->start(WINDOW_LEVEL_TIMEOUT);
+    event->accept();
+  } else if (event->modifiers() & Qt::ControlModifier) {
+    // Ctrl + ホイールでズーム
+    const double scaleFactor = 1.15;
+    if (event->angleDelta().y() > 0) {
+      setZoomFactor(m_zoomFactor * scaleFactor);
+    } else {
+      setZoomFactor(m_zoomFactor / scaleFactor);
+    }
+    event->accept();
+  } else if (isVolumeLoaded() || !m_dicomFiles.isEmpty()) {
+    m_activeViewIndex =
+        viewIndexFromGlobalPos(event->globalPosition().toPoint());
+    if (event->angleDelta().y() > 0) {
+      showPreviousImage();
+    } else if (event->angleDelta().y() < 0) {
+      showNextImage();
+    }
+    event->accept();
+  } else {
+    // Prevent the scroll areas from scrolling when pan mode is disabled
+    event->accept();
+  }
+}
+
+void DicomViewer::mousePressEvent(QMouseEvent *event) {
+  m_activeViewIndex = viewIndexFromGlobalPos(event->globalPosition().toPoint());
+  setFocus();
+
+  if (m_selectingProfileLine && event->button() == Qt::LeftButton) {
+    int view = m_activeViewIndex;
+    if (view >= 0 && view < VIEW_COUNT && !m_isDVHView[view] &&
+        !m_is3DView[view] && !m_isProfileView[view]) {
+      QPoint wpos = m_imageWidgets[view]->mapFromGlobal(
+          event->globalPosition().toPoint());
+      QVector3D patient = patientCoordinateAt(view, wpos);
+      if (!std::isnan(patient.x())) {
+        m_profileStartPatient = patient;
+        m_profileEndPatient = patient;
+        m_profileLine.points.clear();
+        QPointF plane = planeCoordinateFromPatient(view, patient);
+        m_profileLine.points.append(plane);
+        m_profileLine.points.append(plane);
+        m_profileLine.color = Qt::yellow;
+        m_profileLineView = view;
+        m_profileLineVisible = true;
+        m_profileLineHasStart = true;
+        updateImage(view);
+      }
+    }
+    event->accept();
+    return;
+  }
+
+  if (!m_selectingProfileLine && event->button() == Qt::LeftButton &&
+      m_profileLineVisible && m_activeViewIndex == m_profileLineView) {
+    int view = m_activeViewIndex;
+    QPoint wpos =
+        m_imageWidgets[view]->mapFromGlobal(event->globalPosition().toPoint());
+    QVector3D patient = patientCoordinateAt(view, wpos);
+    if (!std::isnan(patient.x())) {
+      QPointF plane = planeCoordinateFromPatient(view, patient);
+      double distStart = QLineF(plane, m_profileLine.points.value(0)).length();
+      double distEnd = QLineF(plane, m_profileLine.points.value(1)).length();
+      const double threshold = 5.0; // mm
+      if (distStart < threshold)
+        m_dragProfileStart = true;
+      else if (distEnd < threshold)
+        m_dragProfileEnd = true;
+      if (m_dragProfileStart || m_dragProfileEnd) {
+        event->accept();
+        return;
+      }
+    }
+  }
+
+  if (m_windowLevelDragActive && event->button() == Qt::LeftButton) {
+    m_dragStartPos = event->pos();
+    m_dragStartWindow = m_windowSlider->value();
+    m_dragStartLevel = m_levelSlider->value();
+    setCursor(Qt::ClosedHandCursor);
+    m_windowLevelTimer->start(WINDOW_LEVEL_TIMEOUT);
+  } else if (event->button() == Qt::RightButton && m_windowLevelDragActive) {
+    stopWindowLevelDrag();
+  } else if (m_panMode && event->button() == Qt::LeftButton) {
+    m_panDragActive = true;
+    // store global position so delta is unaffected by scrolling
+    m_panStartPos = event->globalPosition().toPoint();
+    m_panTimer->start(WINDOW_LEVEL_TIMEOUT);
+    setCursor(Qt::ClosedHandCursor);
+    event->accept();
+    return;
+  } else if (m_zoomMode && event->button() == Qt::LeftButton) {
+    m_zoomDragActive = true;
+    m_zoomStartPos = event->pos();
+    m_zoomStartFactor = m_zoomFactor;
+    m_zoomTimer->start(WINDOW_LEVEL_TIMEOUT);
+    setCursor(Qt::ClosedHandCursor);
+    event->accept();
+    return;
+  } else if (!m_panMode && !m_zoomMode && event->button() == Qt::LeftButton &&
+             m_activeViewIndex >= 0 && m_is3DView[m_activeViewIndex]) {
+    m_rotationDragActive = true;
+    m_rotationStartPos = event->pos();
+    setCursor(Qt::ClosedHandCursor);
+    event->accept();
+    return;
+  }
+
+  QWidget::mousePressEvent(event);
+}
+
+void DicomViewer::mouseMoveEvent(QMouseEvent *event) {
+  int view = viewIndexFromGlobalPos(event->globalPosition().toPoint());
+  m_activeViewIndex = view;
+  if (view >= 0 && view < VIEW_COUNT && !m_isDVHView[view] &&
+      !m_is3DView[view]) {
+    QPoint wpos =
+        m_imageWidgets[view]->mapFromGlobal(event->globalPosition().toPoint());
+    updateCoordLabel(view, wpos);
+  }
+
+  if (m_windowLevelDragActive && (event->buttons() & Qt::LeftButton)) {
+    updateWindowLevelFromMouse(event->pos());
+    m_windowLevelTimer->start(WINDOW_LEVEL_TIMEOUT);
+  } else if (m_selectingProfileLine && m_profileLineHasStart &&
+             (event->buttons() & Qt::LeftButton) && view == m_profileLineView) {
+    QPoint wpos =
+        m_imageWidgets[view]->mapFromGlobal(event->globalPosition().toPoint());
+    QVector3D patient = patientCoordinateAt(view, wpos);
+    if (!std::isnan(patient.x())) {
+      m_profileEndPatient = patient;
+      QPointF plane = planeCoordinateFromPatient(view, patient);
+      if (m_profileLine.points.size() < 2)
+        m_profileLine.points.append(plane);
+      else
+        m_profileLine.points[1] = plane;
+      updateImage(view);
+    }
+    event->accept();
+    return;
+  } else if ((m_dragProfileStart || m_dragProfileEnd) &&
+             (event->buttons() & Qt::LeftButton) && view == m_profileLineView) {
+    QPoint wpos =
+        m_imageWidgets[view]->mapFromGlobal(event->globalPosition().toPoint());
+    QVector3D patient = patientCoordinateAt(view, wpos);
+    if (!std::isnan(patient.x())) {
+      QPointF plane = planeCoordinateFromPatient(view, patient);
+      if (m_dragProfileStart) {
+        m_profileStartPatient = patient;
+        if (m_profileLine.points.size() >= 2)
+          m_profileLine.points[0] = plane;
+      } else if (m_dragProfileEnd) {
+        m_profileEndPatient = patient;
+        if (m_profileLine.points.size() >= 2)
+          m_profileLine.points[1] = plane;
+      }
+      updateImage(view);
+    }
+    event->accept();
+    return;
+  } else if (m_panDragActive && (event->buttons() & Qt::LeftButton)) {
+    QPoint currentGlobal = event->globalPosition().toPoint();
+    QPoint delta = currentGlobal - m_panStartPos;
+
+    // アクティブビューのみパンを更新
+    m_panOffsets[m_activeViewIndex] += QPointF(delta);
+    if (m_is3DView[m_activeViewIndex])
+      m_3dWidgets[m_activeViewIndex]->setPan(m_panOffsets[m_activeViewIndex]);
+    else
+      m_imageWidgets[m_activeViewIndex]->setPan(
+          m_panOffsets[m_activeViewIndex]);
+
+    m_panStartPos = currentGlobal;
+    m_panTimer->start(WINDOW_LEVEL_TIMEOUT);
+    event->accept();
+    return;
+  } else if (m_zoomDragActive && (event->buttons() & Qt::LeftButton)) {
+    int dy = event->pos().y() - m_zoomStartPos.y();
+    double factor = m_zoomStartFactor * (1.0 - dy * 0.01);
+    setZoomFactor(factor);
+    m_zoomTimer->start(WINDOW_LEVEL_TIMEOUT);
+    event->accept();
+    return;
+  } else if (m_rotationDragActive && (event->buttons() & Qt::LeftButton) &&
+             m_activeViewIndex >= 0 && m_is3DView[m_activeViewIndex]) {
+    QPoint delta = event->pos() - m_rotationStartPos;
+    m_3dWidgets[m_activeViewIndex]->addRotation(delta.x(), delta.y());
+    m_rotationStartPos = event->pos();
+    event->accept();
+    return;
+  }
+
+  QWidget::mouseMoveEvent(event);
+}
+
+void DicomViewer::onGenerateQr() {
+  if (!m_qrTextEdit || !m_qrImageLabel)
+    return;
+
+  auto escapeWifiLike = [](const QString &s) -> QString {
+    QString out;
+    out.reserve(s.size() * 2);
+    for (int i = 0; i < s.size(); ++i) {
+      const QChar c = s[i];
+      if (c == QChar('\n') || c == QChar('\r')) {
+        // preserve newlines as-is
+        out.append(c);
+        continue;
+      }
+      if (c == QChar('\\')) {
+        // Preserve existing escape sequence: copy backslash and next char if
+        // any
+        if (i + 1 < s.size()) {
+          out.append('\\');
+          out.append(s[i + 1]);
+          ++i;
+        } else {
+          // Trailing backslash, escape it
+          out.append("\\\\");
+        }
+        continue;
+      }
+      if (c == QChar(';') || c == QChar(',') || c == QChar(':')) {
+        out.append('\\');
+        out.append(c);
+      } else {
+        out.append(c);
+      }
+    }
+    return out;
+  };
+
+  QString text = m_qrTextEdit->toPlainText();
+  if (m_qrEscapeCheck && m_qrEscapeCheck->isChecked()) {
+    text = escapeWifiLike(text);
+  }
+  if (text.isEmpty()) {
+    m_qrImageLabel->clear();
+    return;
+  }
+
+  try {
+    QByteArray utf8 = text.toUtf8();
+    using qrcodegen::QrCode;
+    using qrcodegen::QrSegment;
+
+    QrCode qr = [&]() {
+      // Optionally add UTF-8 ECI; otherwise use bytes-only or encodeText for
+      // ASCII
+      bool addEci = m_qrUtf8EciCheck && m_qrUtf8EciCheck->isChecked();
+      auto isAscii = [&utf8]() {
+        for (unsigned char c : utf8)
+          if (c >= 0x80)
+            return false;
+        return true;
+      }();
+      if (!addEci) {
+        if (isAscii) {
+          return QrCode::encodeText(utf8.constData(), QrCode::Ecc::MEDIUM);
+        } else {
+          std::vector<std::uint8_t> bytes(
+              reinterpret_cast<const std::uint8_t *>(utf8.constData()),
+              reinterpret_cast<const std::uint8_t *>(utf8.constData()) +
+                  utf8.size());
+          std::vector<QrSegment> segs;
+          segs.push_back(QrSegment::makeBytes(bytes));
+          return QrCode::encodeSegments(segs, QrCode::Ecc::MEDIUM);
+        }
+      } else {
+        std::vector<std::uint8_t> bytes(
+            reinterpret_cast<const std::uint8_t *>(utf8.constData()),
+            reinterpret_cast<const std::uint8_t *>(utf8.constData()) +
+                utf8.size());
+        std::vector<QrSegment> segs;
+        segs.push_back(QrSegment::makeEci(26)); // UTF-8 ECI designator
+        segs.push_back(QrSegment::makeBytes(bytes));
+        return QrCode::encodeSegments(segs, QrCode::Ecc::MEDIUM);
+      }
+    }();
+
+    const int border = 8; // generous quiet zone in modules
+    const int modules = qr.getSize();
+    // Render at a steady base scale, then fit to label with nearest-neighbor
+    const int baseScale = 4;
+    const int sizePx = (modules + border * 2) * baseScale;
+
+    QImage img(sizePx, sizePx, QImage::Format_ARGB32);
+    img.fill(Qt::white);
+
+    QPainter p(&img);
+    p.setPen(Qt::NoPen);
+    p.setBrush(Qt::black);
+    for (int y = 0; y < modules; ++y) {
+      for (int x = 0; x < modules; ++x) {
+        if (qr.getModule(x, y)) {
+          QRect r((x + border) * baseScale, (y + border) * baseScale, baseScale,
+                  baseScale);
+          p.drawRect(r);
+        }
+      }
+    }
+    p.end();
+    // Fit to label while keeping module edges crisp (nearest-neighbor)
+    int destW = m_qrImageLabel->width() > 0 ? m_qrImageLabel->width() : 260;
+    int destH = m_qrImageLabel->height() > 0 ? m_qrImageLabel->height() : 260;
+    QImage out =
+        img.scaled(destW, destH, Qt::KeepAspectRatio, Qt::FastTransformation);
+    m_lastQrImage =
+        img; // keep original pixel-perfect image for saving/decoding tests
+    m_qrImageLabel->setPixmap(QPixmap::fromImage(out));
+  } catch (const std::exception &e) {
+    m_qrImageLabel->setText(tr("Failed to generate QR: %1").arg(e.what()));
+  }
+}
+
+void DicomViewer::onClearQr() {
+  if (m_qrTextEdit)
+    m_qrTextEdit->clear();
+  if (m_qrImageLabel)
+    m_qrImageLabel->clear();
+  m_lastQrImage = QImage();
+}
+
+void DicomViewer::onDecodeQrFromImage() {
+  QString file = QFileDialog::getOpenFileName(
+      this, tr("Open Image for QR"), QString(),
+      tr("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;All Files (*.*)"));
+  if (file.isEmpty())
+    return;
+
+  cv::Mat img = cv::imread(file.toStdString(), cv::IMREAD_COLOR);
+  if (img.empty()) {
+    QMessageBox::warning(this, tr("QR Decode"), tr("Failed to load image."));
+    return;
+  }
+
+  try {
+    std::vector<std::vector<cv::Point>> corners;
+    std::vector<std::string> decoded = decodeQrRobust(img, &corners);
+    QString outText;
+    for (size_t i = 0; i < decoded.size(); ++i) {
+      if (i)
+        outText.append('\n');
+      outText.append(QString::fromUtf8(decoded[i].c_str()));
+    }
+
+    if (outText.isEmpty()) {
+      QMessageBox::information(this, tr("QR Decode"),
+                               tr("No QR code detected."));
+      return;
+    }
+
+    if (m_qrTextEdit)
+      m_qrTextEdit->setPlainText(outText);
+
+    // Optionally show the source image in the preview
+    if (m_qrImageLabel) {
+      // Convert BGR -> RGB for QImage
+      cv::Mat rgb;
+      cv::cvtColor(img, rgb, cv::COLOR_BGR2RGB);
+      QImage qimg(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step),
+                  QImage::Format_RGB888);
+      m_qrImageLabel->setPixmap(QPixmap::fromImage(qimg.copy())
+                                    .scaled(m_qrImageLabel->size(),
+                                            Qt::KeepAspectRatio,
+                                            Qt::FastTransformation));
+    }
+  } catch (const std::exception &e) {
+    QMessageBox::warning(this, tr("QR Decode"),
+                         tr("Failed to decode: %1").arg(e.what()));
+  }
+}
+
+void DicomViewer::onSaveQrImage() {
+  if (m_lastQrImage.isNull()) {
+    QMessageBox::information(this, tr("Save QR"),
+                             tr("No QR image to save. Generate first."));
+    return;
+  }
+  QString fn = QFileDialog::getSaveFileName(this, tr("Save QR Image"),
+                                            QString(), tr("PNG Image (*.png)"));
+  if (fn.isEmpty())
+    return;
+  if (!fn.endsWith(".png", Qt::CaseInsensitive))
+    fn += ".png";
+  if (!m_lastQrImage.save(fn, "PNG")) {
+    QMessageBox::warning(this, tr("Save QR"), tr("Failed to save image."));
+  }
+}
+
+// Self Test removed per request
+
+void DicomViewer::onStartQrCamera() {
+  if (m_qrCamRunning)
+    return;
+  try {
+    m_qrCapture = std::make_unique<cv::VideoCapture>(0);
+  } catch (...) {
+    m_qrCapture.reset();
+  }
+  if (!m_qrCapture || !m_qrCapture->isOpened()) {
+    QMessageBox::warning(this, tr("QR Camera"), tr("Failed to open camera."));
+    m_qrCapture.reset();
+    return;
+  }
+  // Set a modest resolution for performance
+  m_qrCapture->set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+  m_qrCapture->set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+  m_qrCamRunning = true;
+  if (m_qrStartCamButton)
+    m_qrStartCamButton->setEnabled(false);
+  if (m_qrStopCamButton)
+    m_qrStopCamButton->setEnabled(true);
+  m_qrCamTimer->start();
+}
+
+void DicomViewer::onStopQrCamera() {
+  if (!m_qrCamRunning)
+    return;
+  m_qrCamTimer->stop();
+  m_qrCamRunning = false;
+  if (m_qrCapture) {
+    m_qrCapture->release();
+    m_qrCapture.reset();
+  }
+  if (m_qrStartCamButton)
+    m_qrStartCamButton->setEnabled(true);
+  if (m_qrStopCamButton)
+    m_qrStopCamButton->setEnabled(false);
+}
+
+void DicomViewer::onQrCameraTick() {
+  if (!m_qrCapture || !m_qrCapture->isOpened()) {
+    onStopQrCamera();
+    return;
+  }
+  cv::Mat frame;
+  if (!m_qrCapture->read(frame) || frame.empty()) {
+    return;
+  }
+  // Decide whether to decode this frame based on time budget
+  bool doDecode = (m_qrTimer.elapsed() >= m_qrDecodeIntervalMs);
+  std::vector<std::vector<cv::Point>> corners;
+  std::vector<std::string> decoded;
+  if (doDecode) {
+    m_qrTimer.restart();
+    if (m_qrHighAccuracyCheck && m_qrHighAccuracyCheck->isChecked())
+      decoded = decodeQrRobust(frame, &corners);
+    else
+      decoded = decodeQrFast(frame, &corners);
+  }
+  // Draw detections (guard sizes)
+  if (!corners.empty()) {
+    for (const auto &poly : corners) {
+      if (poly.size() < 2)
+        continue;
+      for (size_t i = 0; i < poly.size(); ++i) {
+        const cv::Point &a = poly[i];
+        const cv::Point &b = poly[(i + 1) % poly.size()];
+        cv::line(frame, a, b, cv::Scalar(0, 255, 0), 2);
+      }
+    }
+  }
+  // Update text if any
+  if (!decoded.empty() && m_qrTextEdit) {
+    QString out;
+    for (size_t i = 0; i < decoded.size(); ++i) {
+      if (i)
+        out.append('\n');
+      out.append(QString::fromUtf8(decoded[i].c_str()));
+    }
+    m_qrTextEdit->setPlainText(out);
+  }
+  // Show frame
+  if (m_qrImageLabel) {
+    cv::Mat rgb;
+    cv::cvtColor(frame, rgb, cv::COLOR_BGR2RGB);
+    QImage qimg(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step),
+                QImage::Format_RGB888);
+    m_qrImageLabel->setPixmap(QPixmap::fromImage(qimg.copy())
+                                  .scaled(m_qrImageLabel->size(),
+                                          Qt::KeepAspectRatio,
+                                          Qt::FastTransformation));
+  }
+}
+
+void DicomViewer::onAiSendPrompt() {
+  if (!m_lmStudioClient || !m_aiPromptEdit)
+    return;
+
+  const QString prompt = m_aiPromptEdit->toPlainText();
+  if (prompt.trimmed().isEmpty()) {
+    appendAiLog(tr("送信できません: プロンプトが空です。"));
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(tr("プロンプト未入力"));
+    return;
+  }
+
+  const QString systemPromptTemplate =
+      m_aiSystemPromptEdit ? m_aiSystemPromptEdit->toPlainText() : QString();
+  const QString resolvedSystemPrompt =
+      resolveAiSystemPromptTemplate(systemPromptTemplate);
+  const QString endpointText =
+      m_aiEndpointEdit ? m_aiEndpointEdit->text().trimmed() : QString();
+  QString modelText =
+      !m_aiPreferredModel.trimmed().isEmpty()
+          ? m_aiPreferredModel.trimmed()
+          : (m_aiModelCombo ? m_aiModelCombo->currentText().trimmed() : QString());
+
+  if (modelText.trimmed().isEmpty() || modelText == tr("取得中...")) {
+    appendAiLog(tr("送信できません: モデルが選択されていません。"));
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(tr("モデル未選択"));
+    return;
+  }
+
+  if (m_aiStatusLabel)
+    m_aiStatusLabel->setText(tr("送信キューに投入中..."));
+
+  appendAiLog(tr("ユーザー > %1").arg(prompt.trimmed()));
+
+  saveAiSettings();
+
+  m_pendingAiCommands = QJsonArray();
+  m_lastAiCommandSequence = QJsonArray();
+  clearAiCommandList();
+  if (m_aiExecuteButton)
+    m_aiExecuteButton->setEnabled(false);
+
+  if (m_lmStudioClient) {
+    m_lmStudioClient->setEndpoint(QUrl::fromUserInput(endpointText));
+    m_lmStudioClient->setModel(modelText);
+    m_lmStudioClient->sendChatCompletion(resolvedSystemPrompt, prompt);
+  }
+}
+
+void DicomViewer::onAiExecutePendingCommands() {
+  if (m_aiExecutingCommands) {
+    appendAiLog(tr("別のコマンドが実行中です。"));
+    return;
+  }
+  if (m_aiCommandSteps.isEmpty()) {
+    appendAiLog(tr("実行待ちのコマンドはありません。"));
+    if (m_aiExecuteButton)
+      m_aiExecuteButton->setEnabled(false);
+    return;
+  }
+  startAiCommandExecution();
+}
+
+void DicomViewer::onAiAutoExecuteToggled(bool checked) {
+  saveAiSettings();
+  if (checked) {
+    if (!m_aiCommandSteps.isEmpty())
+      startAiCommandExecution();
+    if (m_aiExecuteButton)
+      m_aiExecuteButton->setEnabled(false);
+  } else if (m_aiExecuteButton) {
+    m_aiExecuteButton->setEnabled(!m_aiCommandSteps.isEmpty());
+  }
+}
+
+void DicomViewer::onAiRequestStarted() {
+  m_aiRequestInFlight = true;
+  if (m_aiSendButton)
+    m_aiSendButton->setEnabled(false);
+  if (m_aiExecuteButton)
+    m_aiExecuteButton->setEnabled(false);
+  if (m_aiStatusLabel)
+    m_aiStatusLabel->setText(tr("LMStudioへ送信中..."));
+}
+
+void DicomViewer::onAiRequestFinished(const QString &text) {
+  m_aiRequestInFlight = false;
+  if (m_aiSendButton)
+    m_aiSendButton->setEnabled(true);
+  if (m_aiStatusLabel)
+    m_aiStatusLabel->setText(tr("応答受信"));
+
+  const QString trimmed = text.trimmed();
+  if (!trimmed.isEmpty())
+    appendAiLog(tr("LLM > %1").arg(trimmed));
+
+  const QString cleaned = sanitizeAiJsonText(text);
+  QJsonParseError error;
+  const QJsonDocument doc = QJsonDocument::fromJson(cleaned.toUtf8(), &error);
+  if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+    QString message = tr("応答をJSONとして解析できませんでした。");
+    if (error.error != QJsonParseError::NoError)
+      message += QStringLiteral(" (%1)").arg(error.errorString());
+    appendAiLog(message);
+    const QString failureDetail =
+        error.error != QJsonParseError::NoError
+            ? error.errorString()
+            : tr("JSON応答がオブジェクトではありません。");
+    recordAiPromptFailure(QStringLiteral("json_parse"), failureDetail);
+    m_pendingAiCommands = QJsonArray();
+    m_lastAiCommandSequence = QJsonArray();
+    clearAiCommandList();
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(tr("待機中"));
+    return;
+  }
+
+  const QJsonArray commands =
+      doc.object().value(QStringLiteral("commands")).toArray();
+  if (commands.isEmpty()) {
+    appendAiLog(tr("応答にcommands配列が含まれていません。"));
+    recordAiPromptFailure(QStringLiteral("missing_commands"));
+    m_pendingAiCommands = QJsonArray();
+    m_lastAiCommandSequence = QJsonArray();
+    clearAiCommandList();
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(tr("待機中"));
+    return;
+  }
+
+  handleAiCommands(commands);
+}
+
+void DicomViewer::onAiRequestError(const QString &errorMessage) {
+  m_aiRequestInFlight = false;
+  if (m_aiSendButton)
+    m_aiSendButton->setEnabled(true);
+  if (m_aiStatusLabel)
+    m_aiStatusLabel->setText(tr("エラー: %1").arg(errorMessage));
+  appendAiLog(tr("エラー: %1").arg(errorMessage));
+  m_pendingAiCommands = QJsonArray();
+  m_lastAiCommandSequence = QJsonArray();
+  clearAiCommandList();
+  if (m_aiExecuteButton)
+    m_aiExecuteButton->setEnabled(false);
+}
+
+void DicomViewer::onAiMacroSaveRequested() {
+  QJsonArray sequence = m_lastAiCommandSequence;
+  if (sequence.isEmpty() && !m_aiCommandSteps.isEmpty()) {
+    for (const AiCommandStep &step : m_aiCommandSteps)
+      sequence.append(step.command);
+  }
+  if (sequence.isEmpty()) {
+    appendAiLog(tr("保存できるコマンドがありません。"));
+    return;
+  }
+
+  bool ok = false;
+  const QString name =
+      QInputDialog::getText(this, tr("マクロの保存"), tr("マクロ名:"),
+                            QLineEdit::Normal, QString(), &ok)
+          .trimmed();
+  if (!ok || name.isEmpty()) {
+    appendAiLog(tr("マクロ名が入力されなかったため保存をキャンセルしました。"));
+    return;
+  }
+
+  AiMacroDefinition definition;
+  if (m_aiMacros.contains(name)) {
+    const QMessageBox::StandardButton choice = QMessageBox::question(
+        this, tr("上書き確認"),
+        tr("既存のマクロ\"%1\"を上書きしますか?").arg(name),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (choice != QMessageBox::Yes) {
+      appendAiLog(tr("マクロの保存をキャンセルしました。"));
+      return;
+    }
+    definition = m_aiMacros.value(name);
+  }
+
+  definition.commands = sequence;
+  if (definition.description.trimmed().isEmpty())
+    definition.description = macroDescriptionForSave(name);
+
+  QSet<QString> placeholders;
+  for (const QJsonValue &cmd : sequence)
+    collectMacroPlaceholders(cmd, &placeholders);
+  definition.parameterHints = normalizePlaceholderList(placeholders);
+
+  if (!definition.parameterHints.isEmpty()) {
+    appendAiLog(tr("検出されたプレースホルダ: %1")
+                    .arg(definition.parameterHints.join(
+                        QStringLiteral(", "))));
+  }
+
+  m_aiMacros.insert(name, definition);
+  persistAiMacros();
+  refreshAiMacroCombo();
+  if (m_aiMacroCombo)
+    m_aiMacroCombo->setCurrentText(name);
+  appendAiLog(tr("マクロ\"%1\"を保存しました。").arg(name));
+}
+
+void DicomViewer::onAiMacroDeleteRequested() {
+  if (!m_aiMacroCombo)
+    return;
+  const QString name = m_aiMacroCombo->currentText().trimmed();
+  if (name.isEmpty() || !m_aiMacros.contains(name)) {
+    appendAiLog(tr("削除対象のマクロが選択されていません。"));
+    return;
+  }
+
+  const QMessageBox::StandardButton choice = QMessageBox::question(
+      this, tr("マクロ削除"),
+      tr("マクロ\"%1\"を削除しますか?").arg(name),
+      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+  if (choice != QMessageBox::Yes) {
+    appendAiLog(tr("マクロの削除をキャンセルしました。"));
+    return;
+  }
+
+  m_aiMacros.remove(name);
+  persistAiMacros();
+  refreshAiMacroCombo();
+  appendAiLog(tr("マクロ\"%1\"を削除しました。").arg(name));
+}
+
+void DicomViewer::onAiMacroRunRequested() {
+  if (m_aiExecutingCommands) {
+    appendAiLog(tr("別のコマンドが実行中のためマクロを実行できません。"));
+    return;
+  }
+  if (!m_aiMacroCombo)
+    return;
+  const QString name = m_aiMacroCombo->currentText().trimmed();
+  if (name.isEmpty() || !m_aiMacros.contains(name)) {
+    appendAiLog(tr("選択されたマクロが見つかりません。"));
+    return;
+  }
+  const AiMacroDefinition def = m_aiMacros.value(name);
+  if (def.commands.isEmpty()) {
+    appendAiLog(tr("マクロ\"%1\"にはコマンドが定義されていません。"));
+    return;
+  }
+  appendAiLog(tr("マクロ\"%1\"を読み込みました。").arg(name));
+  const QJsonArray instantiated =
+      instantiateMacro(name, def.commands, def.parameterHints);
+  if (instantiated.isEmpty())
+    return;
+  handleAiCommands(instantiated);
+}
+
+void DicomViewer::onAiMacroExportRequested() {
+  if (!m_aiMacroCombo)
+    return;
+  const QString name = m_aiMacroCombo->currentText().trimmed();
+  if (name.isEmpty() || !m_aiMacros.contains(name)) {
+    appendAiLog(tr("書き出すマクロが選択されていません。"));
+    return;
+  }
+
+  QString fileName = QFileDialog::getSaveFileName(
+      this, tr("マクロの書き出し"),
+      name.isEmpty() ? QString() : name + QStringLiteral(".json"),
+      tr("JSON Files (*.json);;All Files (*.*)"));
+  if (fileName.isEmpty())
+    return;
+  if (!fileName.endsWith(QStringLiteral(".json"), Qt::CaseInsensitive))
+    fileName.append(QStringLiteral(".json"));
+
+  QFile file(fileName);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    appendAiLog(tr("マクロを書き出せませんでした: %1")
+                    .arg(file.errorString()));
+    return;
+  }
+
+  QJsonObject obj;
+  obj.insert(QStringLiteral("name"), name);
+  const AiMacroDefinition def = m_aiMacros.value(name);
+  obj.insert(QStringLiteral("commands"), def.commands);
+  if (!def.description.trimmed().isEmpty())
+    obj.insert(QStringLiteral("description"), def.description);
+  if (!def.parameterHints.isEmpty())
+    obj.insert(QStringLiteral("parameters"),
+               QJsonArray::fromStringList(def.parameterHints));
+
+  QJsonDocument doc(obj);
+  file.write(doc.toJson(QJsonDocument::Indented));
+  file.close();
+  appendAiLog(tr("マクロ\"%1\"を%2に書き出しました。")
+                  .arg(name, QDir::toNativeSeparators(fileName)));
+}
+
+void DicomViewer::onAiMacroImportRequested() {
+  const QString fileName = QFileDialog::getOpenFileName(
+      this, tr("マクロの読み込み"), QString(),
+      tr("JSON Files (*.json);;All Files (*.*)"));
+  if (fileName.isEmpty())
+    return;
+
+  QFile file(fileName);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    appendAiLog(tr("マクロを読み込めませんでした: %1")
+                    .arg(file.errorString()));
+    return;
+  }
+
+  const QByteArray raw = file.readAll();
+  file.close();
+
+  QJsonParseError error{};
+  const QJsonDocument doc = QJsonDocument::fromJson(raw, &error);
+  if (error.error != QJsonParseError::NoError) {
+    appendAiLog(tr("マクロファイルの解析に失敗しました: %1")
+                    .arg(error.errorString()));
+    return;
+  }
+
+  AiMacroDefinition def;
+  QString importedName;
+  if (doc.isArray()) {
+    def.commands = doc.array();
+  } else if (doc.isObject()) {
+    const QJsonObject obj = doc.object();
+    def.commands = obj.value(QStringLiteral("commands")).toArray();
+    def.description =
+        obj.value(QStringLiteral("description")).toString().trimmed();
+    importedName = obj.value(QStringLiteral("name")).toString().trimmed();
+    const QJsonArray params =
+        obj.value(QStringLiteral("parameters")).toArray();
+    for (const QJsonValue &param : params) {
+      if (param.isString())
+        def.parameterHints.append(param.toString());
+    }
+  }
+
+  if (def.commands.isEmpty()) {
+    appendAiLog(tr("マクロファイルにcommands配列が見つかりません。"));
+    return;
+  }
+
+  if (def.parameterHints.isEmpty()) {
+    QSet<QString> placeholders;
+    for (const QJsonValue &cmd : def.commands)
+      collectMacroPlaceholders(cmd, &placeholders);
+    def.parameterHints = normalizePlaceholderList(placeholders);
+  }
+
+  if (!def.parameterHints.isEmpty()) {
+    appendAiLog(tr("インポートしたマクロのプレースホルダ: %1")
+                    .arg(def.parameterHints.join(QStringLiteral(", "))));
+  }
+
+  if (importedName.isEmpty())
+    importedName = QFileInfo(fileName).completeBaseName();
+
+  QString finalName = importedName;
+  if (finalName.trimmed().isEmpty())
+    finalName = tr("インポートマクロ%1").arg(m_aiMacros.size() + 1);
+
+  if (m_aiMacros.contains(finalName)) {
+    bool ok = false;
+    const QString suggestion = finalName + tr("_copy");
+    const QString newName =
+        QInputDialog::getText(this, tr("マクロ名の指定"),
+                              tr("保存するマクロ名:"), QLineEdit::Normal,
+                              suggestion, &ok)
+            .trimmed();
+    if (!ok || newName.isEmpty()) {
+      appendAiLog(tr("マクロの読み込みをキャンセルしました。"));
+      return;
+    }
+    finalName = newName;
+  }
+
+  if (def.description.trimmed().isEmpty())
+    def.description = tr("%1からインポート")
+                           .arg(QFileInfo(fileName).fileName());
+
+  m_aiMacros.insert(finalName, def);
+  persistAiMacros();
+  refreshAiMacroCombo();
+  if (m_aiMacroCombo)
+    m_aiMacroCombo->setCurrentText(finalName);
+  appendAiLog(tr("マクロ\"%1\"を%2から読み込みました。")
+                  .arg(finalName,
+                       QDir::toNativeSeparators(fileName)));
+}
+
+void DicomViewer::onAiEndpointEditingFinished() {
+  if (!m_aiEndpointEdit)
+    return;
+
+  saveAiSettings();
+  fetchAiModelList(true);
+}
+
+void DicomViewer::fetchAiModelList(bool force) {
+  if (!m_lmStudioClient || !m_aiEndpointEdit)
+    return;
+
+  const QString endpointText = m_aiEndpointEdit->text().trimmed();
+  if (endpointText.isEmpty()) {
+    onAiModelsFetchFailed(tr("エンドポイントが設定されていません。"));
+    return;
+  }
+
+  if (!force && !m_availableAiModels.isEmpty() &&
+      endpointText == m_lastAiEndpoint && !m_aiModelsLoading)
+    return;
+
+  if (!force && m_aiModelsLoading && endpointText == m_lastAiEndpoint)
+    return;
+
+  const QUrl endpointUrl = QUrl::fromUserInput(endpointText);
+  if (!endpointUrl.isValid()) {
+    onAiModelsFetchFailed(tr("エンドポイントURLが無効です。"));
+    return;
+  }
+
+  m_lastAiEndpoint = endpointText;
+  if (m_aiStatusLabel && !m_aiRequestInFlight)
+    m_aiStatusLabel->setText(tr("モデル一覧取得中..."));
+
+  appendAiLog(tr("LMStudioからモデル一覧を取得中: %1")
+                  .arg(endpointUrl.toString(QUrl::RemovePassword)));
+
+  if (m_aiModelCombo)
+    m_aiModelCombo->setEnabled(false);
+
+  m_lmStudioClient->setEndpoint(endpointUrl);
+  m_aiModelsLoading = true;
+  m_lmStudioClient->fetchAvailableModels();
+}
+
+void DicomViewer::onAiModelsReceived(const QStringList &models) {
+  m_aiModelsLoading = false;
+  QStringList unique;
+  unique.reserve(models.size());
+  for (const QString &model : models) {
+    const QString trimmed = model.trimmed();
+    if (!trimmed.isEmpty() && !unique.contains(trimmed))
+      unique.append(trimmed);
+  }
+
+  if (unique.isEmpty()) {
+    onAiModelsFetchFailed(tr("LMStudioが利用可能なモデルを返しませんでした。"));
+    return;
+  }
+
+  m_availableAiModels = unique;
+
+  QString desiredModel = m_aiPreferredModel;
+  if (desiredModel.isEmpty())
+    desiredModel = kDefaultLmstudioModel;
+
+  if (!unique.contains(desiredModel)) {
+    const QString fallback = unique.first();
+    if (!m_aiPreferredModel.isEmpty()) {
+      appendAiLog(tr("保存されていたAIモデル\"%1\"は利用できません。%2に切り替えます。")
+                      .arg(m_aiPreferredModel, fallback));
+    }
+    desiredModel = fallback;
+  }
+
+  if (m_aiModelCombo) {
+    QSignalBlocker blocker(m_aiModelCombo);
+    m_aiModelCombo->clear();
+    m_aiModelCombo->addItems(unique);
+    const int index = m_aiModelCombo->findText(desiredModel);
+    m_aiModelCombo->setCurrentIndex(index >= 0 ? index : 0);
+    m_aiModelCombo->setEnabled(true);
+  }
+
+  m_aiPreferredModel = desiredModel;
+
+  if (m_lmStudioClient)
+    m_lmStudioClient->setModel(desiredModel);
+
+  if (m_aiStatusLabel && !m_aiRequestInFlight)
+    m_aiStatusLabel->setText(tr("モデル一覧取得完了"));
+
+  appendAiLog(tr("LMStudioから%1件のモデルを取得しました。")
+                  .arg(m_availableAiModels.size()));
+
+  onAiModelChanged(m_aiModelCombo ? m_aiModelCombo->currentIndex() : -1);
+}
+
+void DicomViewer::onAiModelsFetchFailed(const QString &errorMessage) {
+  const QString trimmed = errorMessage.trimmed();
+  m_aiModelsLoading = false;
+  if (!trimmed.isEmpty()) {
+    appendAiLog(tr("モデル一覧の取得に失敗しました: %1").arg(trimmed));
+  }
+  if (m_aiStatusLabel && !m_aiRequestInFlight)
+    m_aiStatusLabel->setText(tr("モデル一覧取得失敗"));
+
+  if (m_aiModelCombo) {
+    QSignalBlocker blocker(m_aiModelCombo);
+    if (m_availableAiModels.isEmpty()) {
+      m_aiModelCombo->clear();
+      const QString fallback =
+          !m_aiPreferredModel.trimmed().isEmpty() ? m_aiPreferredModel
+                                                  : kDefaultLmstudioModel;
+      m_aiPreferredModel = fallback;
+      m_aiModelCombo->addItem(fallback);
+      m_aiModelCombo->setCurrentIndex(0);
+    } else {
+      m_aiModelCombo->clear();
+      m_aiModelCombo->addItems(m_availableAiModels);
+      const int index = m_aiModelCombo->findText(m_aiPreferredModel);
+      m_aiModelCombo->setCurrentIndex(index >= 0 ? index : 0);
+    }
+    m_aiModelCombo->setEnabled(true);
+  }
+
+  if (m_lmStudioClient && !m_aiPreferredModel.trimmed().isEmpty())
+    m_lmStudioClient->setModel(m_aiPreferredModel);
+
+  saveAiSettings();
+}
+
+void DicomViewer::onAiModelChanged(int) {
+  if (!m_aiModelCombo)
+    return;
+
+  const QString selected = m_aiModelCombo->currentText().trimmed();
+  if (selected.isEmpty() || selected == tr("取得中..."))
+    return;
+
+  m_aiPreferredModel = selected;
+  if (m_lmStudioClient)
+    m_lmStudioClient->setModel(selected);
+
+  saveAiSettings();
+}
+
+// Voice input slots
+void DicomViewer::onAiVoiceRecordButtonClicked() {
+  if (!m_audioRecorder) {
+    qWarning() << "AudioRecorder not initialized";
+    return;
+  }
+
+  if (m_audioRecorder->isRecording()) {
+    // Stop recording
+    m_audioRecorder->stopRecording();
+  } else {
+    // Start recording
+    if (!m_audioRecorder->startRecording()) {
+      QMessageBox::warning(this, tr("音声入力エラー"),
+                          tr("音声録音を開始できませんでした。"));
+    }
+  }
+}
+
+void DicomViewer::onAudioRecordingStarted() {
+  if (m_aiVoiceRecordButton) {
+    m_aiVoiceRecordButton->setText(tr("■ 停止"));
+    m_aiVoiceRecordButton->setStyleSheet("background-color: #ff4444;");
+  }
+  if (m_aiStatusLabel) {
+    m_aiStatusLabel->setText(tr("録音中..."));
+  }
+}
+
+void DicomViewer::onAudioRecordingStopped(const QByteArray &audioData) {
+  if (m_aiVoiceRecordButton) {
+    m_aiVoiceRecordButton->setText(tr("🎤 音声入力"));
+    m_aiVoiceRecordButton->setStyleSheet("");
+  }
+  if (m_aiStatusLabel) {
+    m_aiStatusLabel->setText(tr("音声認識中..."));
+  }
+
+  // Send audio to Whisper for transcription (run in background thread)
+  if (m_whisperClient && !audioData.isEmpty()) {
+    // Run transcription in background to avoid blocking UI
+    // Note: transcribeFromWav will emit transcriptionReady signal,
+    // which is already connected to onWhisperTranscriptionReady slot
+    // Explicitly discard the QFuture return value to suppress nodiscard warning
+    (void)QtConcurrent::run([this, audioData]() {
+      m_whisperClient->transcribeFromWav(audioData);
+    });
+  } else {
+    if (m_aiStatusLabel) {
+      m_aiStatusLabel->setText(tr("音声データが空です"));
+    }
+  }
+}
+
+void DicomViewer::onAudioLevelChanged(float level) {
+  // Optional: Update UI to show audio level
+  // Could update a progress bar or visual indicator
+  Q_UNUSED(level);
+}
+
+void DicomViewer::onWhisperTranscriptionReady(const QString &text) {
+  if (m_aiStatusLabel) {
+    m_aiStatusLabel->setText(tr("認識完了"));
+  }
+
+  // Insert transcribed text into AI prompt input
+  if (m_aiPromptEdit) {
+    QString currentText = m_aiPromptEdit->toPlainText();
+    if (!currentText.isEmpty() && !currentText.endsWith('\n')) {
+      currentText += " ";
+    }
+    currentText += text;
+    m_aiPromptEdit->setPlainText(currentText);
+    m_aiPromptEdit->moveCursor(QTextCursor::End);
+  }
+
+  appendAiLog(tr("音声認識結果: %1").arg(text));
+}
+
+void DicomViewer::onWhisperError(const QString &errorMsg) {
+  if (m_aiStatusLabel) {
+    m_aiStatusLabel->setText(tr("エラー"));
+  }
+
+  QMessageBox::warning(this, tr("音声認識エラー"), errorMsg);
+  appendAiLog(tr("音声認識エラー: %1").arg(errorMsg));
+}
+
+void DicomViewer::onWhisperModelLoaded(bool success) {
+  if (success) {
+    qDebug() << "Whisper model loaded successfully";
+    if (m_aiVoiceRecordButton) {
+      m_aiVoiceRecordButton->setEnabled(true);
+    }
+  } else {
+    qWarning() << "Failed to load Whisper model";
+    if (m_aiVoiceRecordButton) {
+      m_aiVoiceRecordButton->setEnabled(false);
+    }
+
+    // Show multiple possible model locations
+    QString examplePath1 = QDir::homePath() + "/Library/Application Support/ShioRIS3/whisper/models/";
+    QString examplePath2 = WhisperClient::getDefaultModelPath(WhisperClient::ModelSize::Base);
+    examplePath2 = examplePath2.left(examplePath2.lastIndexOf('/') + 1);  // Get directory path
+
+    QMessageBox::warning(
+        this, tr("音声認識"),
+        tr("Whisperモデルの読み込みに失敗しました。\n\n"
+           "以下のいずれかのパスにモデルファイル（ggml-tiny.bin、ggml-base.binなど）を配置してください:\n\n"
+           "1. %1\n"
+           "2. %2\n\n"
+           "モデルファイルのダウンロード方法については、BUILD_INSTRUCTIONS_WHISPER.mdを参照してください。")
+            .arg(examplePath1)
+            .arg(examplePath2));
+  }
+}
+
+void DicomViewer::loadAiSettings() {
+  if (!m_aiEndpointEdit || !m_aiModelCombo || !m_aiSystemPromptEdit ||
+      !m_aiAutoExecuteCheck)
+    return;
+
+  QSettings settings(QStringLiteral("ShioRIS3"), QStringLiteral("ShioRIS3"));
+  QString endpoint =
+      settings.value(QStringLiteral("lmstudio/endpoint"), kDefaultLmstudioEndpoint)
+          .toString()
+          .trimmed();
+  if (endpoint.isEmpty())
+    endpoint = kDefaultLmstudioEndpoint;
+
+  const QString storedModel =
+      settings.value(QStringLiteral("lmstudio/model"), kDefaultLmstudioModel)
+          .toString();
+  const QString trimmedModel = storedModel.trimmed();
+  QString appliedModel = trimmedModel.isEmpty() ? kDefaultLmstudioModel : trimmedModel;
+  const QString systemPrompt = settings
+                                    .value(QStringLiteral("lmstudio/systemPrompt"))
+                                    .toString();
+  const int storedPromptVersion =
+      settings
+          .value(QStringLiteral("lmstudio/promptVersion"),
+                 kDefaultSystemPromptVersion)
+          .toInt();
+  const bool autoExecute =
+      settings.value(QStringLiteral("lmstudio/autoExecute"), true).toBool();
+
+  loadAiPromptDiagnostics();
+
+  m_aiEndpointEdit->setText(endpoint);
+  m_availableAiModels.clear();
+  m_aiPreferredModel = appliedModel;
+
+  if (m_aiModelCombo) {
+    QSignalBlocker blocker(m_aiModelCombo);
+    m_aiModelCombo->clear();
+    m_aiModelCombo->addItem(appliedModel);
+    m_aiModelCombo->setCurrentIndex(0);
+    m_aiModelCombo->setEnabled(true);
+  }
+  if (appliedModel != trimmedModel) {
+    settings.setValue(QStringLiteral("lmstudio/model"), appliedModel);
+  }
+  const QString defaultPrompt = defaultAiSystemPromptTemplate();
+  const bool promptEmpty = systemPrompt.trimmed().isEmpty();
+  const bool promptOutdated =
+      storedPromptVersion < kDefaultSystemPromptVersion ||
+      isAiPromptOutdated(systemPrompt);
+  if (promptEmpty || promptOutdated) {
+    if (!promptEmpty) {
+      appendAiLog(
+          tr("保存されていたAIシステムプロンプトが古かったため最新推奨版に更新しました。"));
+    }
+    m_aiSystemPromptEdit->setPlainText(defaultPrompt);
+    settings.setValue(QStringLiteral("lmstudio/systemPrompt"), defaultPrompt);
+    settings.setValue(QStringLiteral("lmstudio/promptVersion"),
+                      kDefaultSystemPromptVersion);
+  } else {
+    m_aiSystemPromptEdit->setPlainText(systemPrompt);
+    settings.setValue(QStringLiteral("lmstudio/promptVersion"),
+                      kDefaultSystemPromptVersion);
+  }
+  m_aiAutoExecuteCheck->setChecked(autoExecute);
+  if (m_aiStatusLabel)
+    m_aiStatusLabel->setText(tr("待機中"));
+
+  if (m_lmStudioClient) {
+    m_lmStudioClient->setEndpoint(QUrl::fromUserInput(endpoint));
+    m_lmStudioClient->setModel(appliedModel);
+  }
+
+  loadAiMacros();
+  m_lastAiEndpoint.clear();
+  fetchAiModelList(true);
+}
+
+void DicomViewer::saveAiSettings() const {
+  if (!m_aiEndpointEdit || !m_aiModelCombo || !m_aiSystemPromptEdit ||
+      !m_aiAutoExecuteCheck)
+    return;
+
+  QSettings settings(QStringLiteral("ShioRIS3"), QStringLiteral("ShioRIS3"));
+  settings.setValue(QStringLiteral("lmstudio/endpoint"),
+                    m_aiEndpointEdit->text().trimmed());
+  settings.setValue(QStringLiteral("lmstudio/model"),
+                    m_aiModelCombo->currentText().trimmed());
+  settings.setValue(QStringLiteral("lmstudio/systemPrompt"),
+                    m_aiSystemPromptEdit->toPlainText());
+  settings.setValue(QStringLiteral("lmstudio/autoExecute"),
+                    m_aiAutoExecuteCheck->isChecked());
+  settings.setValue(QStringLiteral("lmstudio/promptVersion"),
+                    kDefaultSystemPromptVersion);
+  saveAiPromptDiagnostics();
+}
+
+void DicomViewer::loadAiPromptDiagnostics() {
+  m_aiPromptFailureCounters.clear();
+  m_aiPromptFailureDetails.clear();
+  QSettings settings(QStringLiteral("ShioRIS3"), QStringLiteral("ShioRIS3"));
+  const QVariantMap countersMap =
+      settings.value(QStringLiteral("lmstudio/promptDiagnostics")).toMap();
+  for (auto it = countersMap.constBegin(); it != countersMap.constEnd(); ++it) {
+    m_aiPromptFailureCounters.insert(it.key(), it.value().toInt());
+  }
+  const QVariantMap detailMap =
+      settings.value(QStringLiteral("lmstudio/promptDiagnosticsDetails"))
+          .toMap();
+  for (auto it = detailMap.constBegin(); it != detailMap.constEnd(); ++it) {
+    m_aiPromptFailureDetails.insert(it.key(), it.value().toString());
+  }
+}
+
+void DicomViewer::saveAiPromptDiagnostics() const {
+  QSettings settings(QStringLiteral("ShioRIS3"), QStringLiteral("ShioRIS3"));
+  QVariantMap countersMap;
+  for (auto it = m_aiPromptFailureCounters.constBegin();
+       it != m_aiPromptFailureCounters.constEnd(); ++it) {
+    countersMap.insert(it.key(), it.value());
+  }
+  settings.setValue(QStringLiteral("lmstudio/promptDiagnostics"), countersMap);
+
+  QVariantMap detailMap;
+  for (auto it = m_aiPromptFailureDetails.constBegin();
+       it != m_aiPromptFailureDetails.constEnd(); ++it) {
+    detailMap.insert(it.key(), it.value());
+  }
+  settings.setValue(QStringLiteral("lmstudio/promptDiagnosticsDetails"), detailMap);
+}
+
+void DicomViewer::appendAiLog(const QString &message) {
+  if (!m_aiLogView)
+    return;
+  const QString timestamp = QDateTime::currentDateTime().toString(
+      QStringLiteral("yyyy-MM-dd hh:mm:ss"));
+  m_aiLogView->appendPlainText(QStringLiteral("[%1] %2").arg(timestamp, message));
+}
+
+QString DicomViewer::defaultAiSystemPromptTemplate() const {
+  return buildDefaultPromptTemplate();
+}
+
+QString DicomViewer::resolveAiSystemPromptTemplate(
+    const QString &templateText) const {
+  QString resolved = templateText.trimmed().isEmpty()
+                          ? defaultAiSystemPromptTemplate()
+                          : templateText;
+
+  const QString contextSection = buildAiViewerContextSection();
+  if (resolved.contains(QStringLiteral("{{VIEWER_CONTEXT_JSON}}"))) {
+    resolved.replace(QStringLiteral("{{VIEWER_CONTEXT_JSON}}"), contextSection);
+  } else if (!contextSection.trimmed().isEmpty()) {
+    resolved.append(QStringLiteral("\n\n## Live Viewer Context\n%1")
+                        .arg(contextSection));
+  }
+
+  const QString feedbackSection = buildAiFeedbackSection();
+  if (resolved.contains(QStringLiteral("{{PROMPT_FEEDBACK}}"))) {
+    resolved.replace(QStringLiteral("{{PROMPT_FEEDBACK}}"), feedbackSection);
+  } else if (!feedbackSection.trimmed().isEmpty()) {
+    resolved.append(QStringLiteral("\n\n## Runtime Feedback\n%1")
+                        .arg(feedbackSection));
+  }
+
+  return resolved;
+}
+
+QJsonObject DicomViewer::aiExecutionSnapshotToJson(
+    const AiExecutionSnapshot &snapshot) const {
+  QJsonObject obj;
+  obj.insert(QStringLiteral("valid"), snapshot.valid);
+  obj.insert(QStringLiteral("hasDataset"), snapshot.hasDataset);
+  if (snapshot.hasDataset) {
+    obj.insert(QStringLiteral("datasetPath"), snapshot.datasetPath);
+    obj.insert(QStringLiteral("datasetIsDirectory"),
+               snapshot.datasetIsDirectory);
+  }
+
+  auto viewModeToString = [](ViewMode mode) -> QString {
+    switch (mode) {
+    case ViewMode::Single:
+      return QStringLiteral("single");
+    case ViewMode::Dual:
+      return QStringLiteral("dual");
+    case ViewMode::Quad:
+      return QStringLiteral("quad");
+    case ViewMode::Five:
+      return QStringLiteral("five");
+    }
+    return QStringLiteral("unknown");
+  };
+
+  obj.insert(QStringLiteral("viewMode"), viewModeToString(snapshot.viewMode));
+  QJsonArray contents;
+  for (const QString &value : snapshot.viewContents)
+    contents.append(value);
+  obj.insert(QStringLiteral("viewContents"), contents);
+  obj.insert(QStringLiteral("activeViewIndex"), snapshot.activeViewIndex);
+  obj.insert(QStringLiteral("zoomFactor"), snapshot.zoomFactor);
+  obj.insert(QStringLiteral("syncScale"), snapshot.syncScale);
+  obj.insert(QStringLiteral("autoExecuteEnabled"),
+             m_aiAutoExecuteCheck && m_aiAutoExecuteCheck->isChecked());
+  obj.insert(QStringLiteral("pendingCommandCount"), m_aiCommandSteps.size());
+  obj.insert(QStringLiteral("visibleViewCount"), visibleViewCount());
+
+  obj.insert(QStringLiteral("rtstructLoaded"), snapshot.rtstructLoaded);
+  if (snapshot.rtstructLoaded) {
+    obj.insert(QStringLiteral("rtstructPath"), snapshot.rtstructPath);
+    QJsonArray structures;
+    for (int state : snapshot.structureCheckStates) {
+      QString stateText;
+      switch (static_cast<Qt::CheckState>(state)) {
+      case Qt::Checked:
+        stateText = QStringLiteral("checked");
+        break;
+      case Qt::PartiallyChecked:
+        stateText = QStringLiteral("partially_checked");
+        break;
+      case Qt::Unchecked:
+      default:
+        stateText = QStringLiteral("unchecked");
+        break;
+      }
+      structures.append(stateText);
+    }
+    obj.insert(QStringLiteral("structureVisibility"), structures);
+  }
+
+  QJsonArray macroNames;
+  const QStringList names = m_aiMacros.keys();
+  for (const QString &name : names)
+    macroNames.append(name);
+  obj.insert(QStringLiteral("availableMacros"), macroNames);
+
+  return obj;
+}
+
+QString DicomViewer::buildAiViewerContextJson() const {
+  const AiExecutionSnapshot snapshot = captureAiViewerSnapshot();
+  const QJsonObject obj = aiExecutionSnapshotToJson(snapshot);
+  const QJsonDocument doc(obj);
+  return QString::fromUtf8(doc.toJson(QJsonDocument::Indented)).trimmed();
+}
+
+QString DicomViewer::buildAiViewerContextSection() const {
+  const QString json = buildAiViewerContextJson();
+  if (json.isEmpty())
+    return QStringLiteral("{}");
+  return json;
+}
+
+QStringList DicomViewer::aiPromptFeedbackMessages() const {
+  QStringList messages;
+  const QHash<QString, QString> &baseMessages = promptFailureBaseMessages();
+  for (auto it = m_aiPromptFailureCounters.constBegin();
+       it != m_aiPromptFailureCounters.constEnd(); ++it) {
+    if (it.value() <= 0)
+      continue;
+    const QString key = it.key();
+    const QString base = baseMessages.value(key);
+    const QString detail = m_aiPromptFailureDetails.value(key);
+    if (base.isEmpty()) {
+      if (!detail.trimmed().isEmpty()) {
+        messages.append(
+            tr("%1 (発生回数: %2)").arg(detail.trimmed()).arg(it.value()));
+      }
+      continue;
+    }
+    if (detail.trimmed().isEmpty()) {
+      messages.append(
+          tr("%1 (発生回数: %2)").arg(base).arg(it.value()));
+    } else {
+      messages.append(tr("%1 (発生回数: %2, 直近: %3)")
+                          .arg(base)
+                          .arg(it.value())
+                          .arg(detail.trimmed()));
+    }
+  }
+  return messages;
+}
+
+QString DicomViewer::buildAiFeedbackSection() const {
+  const QStringList messages = aiPromptFeedbackMessages();
+  if (messages.isEmpty())
+    return tr("- 現在記録された失敗はありません。");
+  QStringList lines;
+  for (const QString &message : messages)
+    lines << QStringLiteral("- %1").arg(message);
+  return lines.join(QChar('\n'));
+}
+
+void DicomViewer::recordAiPromptFailure(const QString &category,
+                                        const QString &detail) {
+  const QString key = category.trimmed();
+  if (key.isEmpty())
+    return;
+  const int count = m_aiPromptFailureCounters.value(key, 0) + 1;
+  m_aiPromptFailureCounters.insert(key, count);
+  if (!detail.trimmed().isEmpty())
+    m_aiPromptFailureDetails.insert(key, detail.trimmed());
+  saveAiPromptDiagnostics();
+}
+
+void DicomViewer::collectMacroPlaceholders(const QJsonValue &value,
+                                           QSet<QString> *placeholders) const {
+  if (!placeholders)
+    return;
+  if (value.isString()) {
+    const QString text = value.toString();
+    static const QRegularExpression kPattern(
+        QStringLiteral("\\{\\{([A-Za-z0-9_-]+)\\}\\}"));
+    QRegularExpressionMatchIterator it = kPattern.globalMatch(text);
+    while (it.hasNext()) {
+      const QRegularExpressionMatch match = it.next();
+      const QString token = match.captured(1).trimmed();
+      if (!token.isEmpty())
+        placeholders->insert(token);
+    }
+    return;
+  }
+  if (value.isArray()) {
+    const QJsonArray arr = value.toArray();
+    for (const QJsonValue &child : arr)
+      collectMacroPlaceholders(child, placeholders);
+    return;
+  }
+  if (value.isObject()) {
+    const QJsonObject obj = value.toObject();
+    for (auto it = obj.constBegin(); it != obj.constEnd(); ++it)
+      collectMacroPlaceholders(it.value(), placeholders);
+  }
+}
+
+QJsonValue DicomViewer::applyMacroParameters(
+    const QJsonValue &value,
+    const QHash<QString, QString> &parameters) const {
+  if (value.isString()) {
+    QString text = value.toString();
+    for (auto it = parameters.constBegin(); it != parameters.constEnd(); ++it) {
+      const QString placeholder = QStringLiteral("{{%1}}").arg(it.key());
+      text.replace(placeholder, it.value());
+    }
+    return text;
+  }
+  if (value.isArray()) {
+    QJsonArray result;
+    const QJsonArray arr = value.toArray();
+    for (const QJsonValue &child : arr)
+      result.append(applyMacroParameters(child, parameters));
+    return result;
+  }
+  if (value.isObject()) {
+    QJsonObject obj = value.toObject();
+    for (auto it = obj.begin(); it != obj.end(); ++it)
+      it.value() = applyMacroParameters(it.value(), parameters);
+    return obj;
+  }
+  return value;
+}
+
+QStringList DicomViewer::normalizePlaceholderList(
+    const QSet<QString> &placeholders) const {
+  QStringList list = placeholders.values();
+  std::sort(list.begin(), list.end(), [](const QString &a, const QString &b) {
+    return a.compare(b, Qt::CaseInsensitive) < 0;
+  });
+  return list;
+}
+
+QString DicomViewer::macroDescriptionForSave(const QString &name) const {
+  return tr("マクロ%1を%2に記録").arg(name, QDateTime::currentDateTime()
+                                              .toString(QStringLiteral(
+                                                  "yyyy-MM-dd hh:mm")));
+}
+
+QJsonArray DicomViewer::instantiateMacro(const QString &macroName,
+                                         const QJsonArray &commands,
+                                         const QStringList &placeholders) {
+  if (placeholders.isEmpty())
+    return commands;
+
+  QHash<QString, QString> parameterValues;
+  for (const QString &placeholder : placeholders) {
+    bool ok = false;
+    const QString value =
+        QInputDialog::getText(this, tr("マクロパラメータ"),
+                              tr("%1の値を入力してください:").arg(placeholder),
+                              QLineEdit::Normal, QString(), &ok)
+            .trimmed();
+    if (!ok) {
+      appendAiLog(tr("マクロ\"%1\"の実行をキャンセルしました。")
+                      .arg(macroName));
+      return QJsonArray();
+    }
+    parameterValues.insert(placeholder, value);
+  }
+
+  QJsonArray result;
+  for (const QJsonValue &command : commands)
+    result.append(applyMacroParameters(command, parameterValues));
+
+  if (!parameterValues.isEmpty()) {
+    QStringList summary;
+    QStringList keys = parameterValues.keys();
+    std::sort(keys.begin(), keys.end(),
+              [](const QString &a, const QString &b) {
+                return a.compare(b, Qt::CaseInsensitive) < 0;
+              });
+    for (const QString &key : keys)
+      summary << QStringLiteral("%1=%2").arg(key, parameterValues.value(key));
+    appendAiLog(tr("マクロ\"%1\"のパラメータ: %2")
+                    .arg(macroName, summary.join(QStringLiteral(", "))));
+  }
+
+  return result;
+}
+
+void DicomViewer::clearAiCommandList() {
+  m_aiCommandSteps.clear();
+  m_aiCommandItems.clear();
+  if (m_aiCommandList)
+    m_aiCommandList->clear();
+  if (m_aiExecuteButton && !m_aiExecutingCommands)
+    m_aiExecuteButton->setEnabled(false);
+}
+
+void DicomViewer::populateAiCommandList() {
+  if (!m_aiCommandList)
+    return;
+  m_aiCommandList->clear();
+  m_aiCommandItems.clear();
+  for (int i = 0; i < m_aiCommandSteps.size(); ++i) {
+    QTreeWidgetItem *item = new QTreeWidgetItem(m_aiCommandList);
+    const QString description =
+        aiCommandDescription(m_aiCommandSteps[i].command);
+    item->setText(0, QStringLiteral("#%1 %2").arg(i + 1).arg(description));
+    item->setText(1, aiCommandStatusText(m_aiCommandSteps[i].status));
+    item->setForeground(1, QBrush(
+                                  aiCommandStatusColor(m_aiCommandSteps[i].status)));
+    if (!m_aiCommandSteps[i].message.isEmpty()) {
+      item->setToolTip(0, m_aiCommandSteps[i].message);
+      item->setToolTip(1, m_aiCommandSteps[i].message);
+    }
+    m_aiCommandItems.push_back(item);
+  }
+  if (m_aiCommandList->header()) {
+    m_aiCommandList->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_aiCommandList->header()->setSectionResizeMode(1,
+                                                   QHeaderView::ResizeToContents);
+  }
+}
+
+QString DicomViewer::aiCommandDescription(const QJsonObject &command) const {
+  const QString action = command.value(QStringLiteral("action")).toString();
+  const QJsonObject params =
+      command.value(QStringLiteral("params")).toObject();
+  QStringList paramParts;
+  const auto keys = params.keys();
+  for (const QString &key : keys) {
+    const QJsonValue value = params.value(key);
+    QString valueText;
+    if (value.isString()) {
+      valueText = value.toString();
+    } else if (value.isDouble()) {
+      valueText = QString::number(value.toDouble());
+    } else if (value.isBool()) {
+      valueText = value.toBool() ? tr("true") : tr("false");
+    } else if (value.isArray()) {
+      valueText = tr("配列%1件").arg(value.toArray().size());
+    } else if (value.isObject()) {
+      valueText = tr("オブジェクト");
+    }
+    if (!valueText.isEmpty())
+      paramParts << QStringLiteral("%1=%2").arg(key, valueText);
+  }
+  const QString paramText = paramParts.isEmpty()
+                                ? QString()
+                                : QStringLiteral(" (%1)")
+                                      .arg(paramParts.join(QStringLiteral(", ")));
+  if (action.isEmpty())
+    return tr("action未指定%1").arg(paramText);
+  return QStringLiteral("%1%2").arg(action, paramText);
+}
+
+QString DicomViewer::aiCommandStatusText(AiCommandStep::Status status) const {
+  switch (status) {
+  case AiCommandStep::Status::Pending:
+    return tr("待機中");
+  case AiCommandStep::Status::Running:
+    return tr("実行中");
+  case AiCommandStep::Status::Success:
+    return tr("完了");
+  case AiCommandStep::Status::Failed:
+    return tr("失敗");
+  case AiCommandStep::Status::RolledBack:
+    return tr("ロールバック済");
+  }
+  return QString();
+}
+
+QColor DicomViewer::aiCommandStatusColor(AiCommandStep::Status status) const {
+  switch (status) {
+  case AiCommandStep::Status::Pending:
+    return QColor(Qt::darkGray);
+  case AiCommandStep::Status::Running:
+    return QColor(Qt::blue);
+  case AiCommandStep::Status::Success:
+    return QColor(Qt::darkGreen);
+  case AiCommandStep::Status::Failed:
+    return QColor(Qt::red);
+  case AiCommandStep::Status::RolledBack:
+    return QColor(Qt::darkYellow);
+  }
+  return QColor(Qt::black);
+}
+
+void DicomViewer::updateAiCommandStatus(int index,
+                                        AiCommandStep::Status status,
+                                        const QString &message) {
+  if (index < 0 || index >= m_aiCommandSteps.size())
+    return;
+  m_aiCommandSteps[index].status = status;
+  if (!message.isEmpty())
+    m_aiCommandSteps[index].message = message;
+  if (index >= m_aiCommandItems.size())
+    return;
+  QTreeWidgetItem *item = m_aiCommandItems[index];
+  if (!item)
+    return;
+  item->setText(1, aiCommandStatusText(status));
+  item->setForeground(1, QBrush(aiCommandStatusColor(status)));
+  if (!m_aiCommandSteps[index].message.isEmpty()) {
+    item->setToolTip(0, m_aiCommandSteps[index].message);
+    item->setToolTip(1, m_aiCommandSteps[index].message);
+  }
+}
+
+DicomViewer::AiExecutionSnapshot DicomViewer::captureAiViewerSnapshot() const {
+  AiExecutionSnapshot snapshot;
+  snapshot.valid = true;
+  snapshot.hasDataset = m_aiHasDicomSource;
+  snapshot.datasetPath = m_aiCurrentDicomSourcePath;
+  snapshot.datasetIsDirectory = m_aiCurrentDicomSourceIsDirectory;
+  snapshot.viewMode = m_viewMode;
+  snapshot.viewContents.reserve(VIEW_COUNT);
+  for (int i = 0; i < VIEW_COUNT; ++i)
+    snapshot.viewContents << viewContentToString(i);
+  snapshot.activeViewIndex = m_activeViewIndex;
+  snapshot.zoomFactor = m_zoomFactor;
+  snapshot.syncScale = m_syncScale;
+  snapshot.rtstructLoaded = m_rtstructLoaded;
+  snapshot.rtstructPath = m_lastRtStructPath;
+  snapshot.structureCheckStates.clear();
+  if (m_rtstructLoaded && m_structureList) {
+    const int itemCount = m_structureList->count();
+    snapshot.structureCheckStates.reserve(itemCount);
+    for (int i = 0; i < itemCount; ++i) {
+      if (QListWidgetItem *item = m_structureList->item(i)) {
+        snapshot.structureCheckStates.append(static_cast<int>(item->checkState()));
+      } else {
+        snapshot.structureCheckStates.append(static_cast<int>(Qt::Unchecked));
+      }
+    }
+  }
+  return snapshot;
+}
+
+void DicomViewer::restoreAiViewerSnapshot(
+    const AiExecutionSnapshot &snapshot) {
+  if (!snapshot.valid)
+    return;
+  bool datasetLoaded = false;
+  if (snapshot.hasDataset && !snapshot.datasetPath.isEmpty()) {
+    if (snapshot.datasetIsDirectory)
+      datasetLoaded = loadDicomDirectory(snapshot.datasetPath);
+    else
+      datasetLoaded = loadDicomFile(snapshot.datasetPath);
+  }
+  if (snapshot.rtstructLoaded) {
+    const QString rtstructPath = snapshot.rtstructPath;
+    if (!rtstructPath.isEmpty()) {
+      if (QFile::exists(rtstructPath)) {
+        const bool needsReload =
+            !m_rtstructLoaded ||
+            m_lastRtStructPath.compare(rtstructPath, Qt::CaseInsensitive) != 0;
+        if (needsReload) {
+          if (!loadRTStructFile(rtstructPath)) {
+            qWarning() << "Snapshot RTSTRUCT reload failed:" << rtstructPath;
+          }
+        }
+      } else {
+        qWarning() << "Snapshot RTSTRUCT not restored; file missing:"
+                   << rtstructPath;
+      }
+    }
+    if (m_rtstructLoaded && !snapshot.structureCheckStates.isEmpty() &&
+        m_structureList) {
+      const int structureCount = m_structureList->count();
+      const int savedStateCount =
+          static_cast<int>(std::min<qsizetype>(snapshot.structureCheckStates.size(),
+                                               std::numeric_limits<int>::max()));
+      int itemCount = std::min(structureCount, savedStateCount);
+      itemCount = std::min(itemCount, m_rtstruct.roiCount());
+      if (itemCount > 0) {
+        QSignalBlocker blocker(m_structureList);
+        for (int i = 0; i < itemCount; ++i) {
+          if (QListWidgetItem *item = m_structureList->item(i)) {
+            Qt::CheckState state =
+                static_cast<Qt::CheckState>(snapshot.structureCheckStates.at(i));
+            item->setCheckState(state);
+            m_rtstruct.setROIVisible(i, state == Qt::Checked);
+          }
+        }
+      }
+      updateImage();
+    } else if (!snapshot.structureCheckStates.isEmpty() && !m_structureList &&
+               datasetLoaded) {
+      qWarning() << "Structure list not available to restore snapshot states.";
+    }
+  }
+  setViewMode(snapshot.viewMode);
+  setSyncScale(snapshot.syncScale);
+  for (int i = 0; i < snapshot.viewContents.size() && i < VIEW_COUNT; ++i)
+    applyViewContentFromString(i, snapshot.viewContents.at(i));
+  m_activeViewIndex = clampToVisibleViewIndex(snapshot.activeViewIndex);
+  setZoomFactor(snapshot.zoomFactor);
+  updateSliderPosition();
+  updateImage();
+}
+
+DicomViewer::RoiUiSnapshot DicomViewer::captureRoiUiSnapshot() const {
+  RoiUiSnapshot snapshot;
+  if (!m_structureList)
+    return snapshot;
+
+  snapshot.hasStructureList = true;
+  snapshot.currentRow = m_structureList->currentRow();
+  const int count = m_structureList->count();
+  snapshot.items.reserve(count);
+  for (int i = 0; i < count; ++i) {
+    QListWidgetItem *item = m_structureList->item(i);
+    RoiListItemSnapshot itemSnapshot;
+    if (item) {
+      itemSnapshot.text = item->text();
+      itemSnapshot.checkState = item->checkState();
+      itemSnapshot.icon = item->icon();
+    }
+    snapshot.items.push_back(std::move(itemSnapshot));
+  }
+  return snapshot;
+}
+
+void DicomViewer::restoreRoiUiSnapshot(const RoiUiSnapshot &snapshot) {
+  if (!snapshot.hasStructureList || !m_structureList)
+    return;
+
+  const int currentCount = m_structureList->count();
+  if (currentCount != snapshot.items.size())
+    return;
+
+  bool textsMatch = true;
+  for (int i = 0; i < currentCount; ++i) {
+    QListWidgetItem *item = m_structureList->item(i);
+    if (!item) {
+      textsMatch = false;
+      break;
+    }
+    const QString &savedText = snapshot.items.at(i).text;
+    if (!savedText.isEmpty() && item->text() != savedText) {
+      textsMatch = false;
+      break;
+    }
+  }
+  if (!textsMatch)
+    return;
+
+  QSignalBlocker blocker(m_structureList);
+  for (int i = 0; i < currentCount; ++i) {
+    QListWidgetItem *item = m_structureList->item(i);
+    if (!item)
+      continue;
+    const RoiListItemSnapshot &saved = snapshot.items.at(i);
+    if (!saved.text.isEmpty() && item->text() != saved.text)
+      item->setText(saved.text);
+    item->setCheckState(saved.checkState);
+    if (!saved.icon.isNull())
+      item->setIcon(saved.icon);
+  }
+  if (snapshot.currentRow >= 0 &&
+      snapshot.currentRow < m_structureList->count()) {
+    m_structureList->setCurrentRow(snapshot.currentRow);
+  }
+}
+
+QString DicomViewer::viewContentToString(int viewIndex) const {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return QString();
+  if (m_isDVHView[viewIndex])
+    return QStringLiteral("dvh");
+  if (m_is3DView[viewIndex])
+    return QStringLiteral("3d");
+  if (m_isProfileView[viewIndex])
+    return QStringLiteral("profile");
+  switch (m_viewOrientations[viewIndex]) {
+  case DicomVolume::Orientation::Axial:
+    return QStringLiteral("axial");
+  case DicomVolume::Orientation::Sagittal:
+    return QStringLiteral("sagittal");
+  case DicomVolume::Orientation::Coronal:
+    return QStringLiteral("coronal");
+  default:
+    break;
+  }
+  return QString();
+}
+
+bool DicomViewer::applyViewContentFromString(int viewIndex,
+                                             const QString &content) {
+  if (content.trimmed().isEmpty())
+    return false;
+  return switchViewContentFromString(viewIndex, content);
+}
+
+void DicomViewer::rollbackToSnapshot(const AiExecutionSnapshot &snapshot) {
+  restoreAiViewerSnapshot(snapshot);
+  for (int i = 0; i < m_aiCommandSteps.size(); ++i) {
+    if (m_aiCommandSteps[i].status == AiCommandStep::Status::Success ||
+        m_aiCommandSteps[i].status == AiCommandStep::Status::Running) {
+      updateAiCommandStatus(i, AiCommandStep::Status::RolledBack);
+    }
+  }
+  if (m_aiStatusLabel)
+    m_aiStatusLabel->setText(tr("ロールバック完了"));
+  appendAiLog(tr("ビューア状態をロールバックしました。"));
+}
+
+void DicomViewer::startAiCommandExecution() {
+  if (m_aiExecutingCommands)
+    return;
+  if (m_aiCommandSteps.isEmpty()) {
+    appendAiLog(tr("実行待ちのコマンドはありません。"));
+    if (m_aiExecuteButton)
+      m_aiExecuteButton->setEnabled(false);
+    return;
+  }
+
+  m_aiExecutingCommands = true;
+  if (m_aiExecuteButton)
+    m_aiExecuteButton->setEnabled(false);
+
+  appendAiLog(tr("AIコマンドを%1件実行します。")
+                   .arg(m_aiCommandSteps.size()));
+
+  const AiExecutionSnapshot snapshot = captureAiViewerSnapshot();
+  bool successAll = true;
+  for (int i = 0; i < m_aiCommandSteps.size(); ++i) {
+    updateAiCommandStatus(i, AiCommandStep::Status::Running);
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(
+          tr("実行中 (%1/%2)").arg(i + 1).arg(m_aiCommandSteps.size()));
+    const QJsonObject command = m_aiCommandSteps[i].command;
+    bool ok = false;
+    if (command.isEmpty()) {
+      appendAiLog(tr("コマンド%1が空でした。"));
+    } else {
+      ok = executeAiCommand(command);
+    }
+    if (ok) {
+      updateAiCommandStatus(i, AiCommandStep::Status::Success);
+    } else {
+      updateAiCommandStatus(i, AiCommandStep::Status::Failed);
+      successAll = false;
+      break;
+    }
+  }
+
+  if (successAll) {
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(
+          tr("完了 (%1件)").arg(m_aiCommandSteps.size()));
+    appendAiLog(tr("AIコマンドの実行が完了しました。"));
+  } else {
+    //appendAiLog(tr("エラーが発生したためコマンド実行を中断しました。"));
+    //rollbackToSnapshot(snapshot);
+    appendAiLog(tr("エラーが発生したためコマンド実行を中断しました。"));
+    appendAiLog(tr("注意: データと画面状態は現在のまま維持されます。"));
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(tr("エラー: 実行中断"));
+  }
+
+  m_pendingAiCommands = QJsonArray();
+  m_aiExecutingCommands = false;
+}
+
+void DicomViewer::handleAiCommands(const QJsonArray &commands) {
+  clearAiCommandList();
+  m_pendingAiCommands = commands;
+  m_lastAiCommandSequence = commands;
+
+  if (commands.isEmpty()) {
+    appendAiLog(tr("実行可能なコマンドがありませんでした。"));
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(tr("待機中"));
+    return;
+  }
+
+  for (int i = 0; i < commands.size(); ++i) {
+    const QJsonValue value = commands.at(i);
+    if (!value.isObject()) {
+      appendAiLog(
+          tr("コマンド%1がオブジェクトではありません。省略します。")
+              .arg(i + 1));
+      continue;
+    }
+    AiCommandStep step;
+    step.command = value.toObject();
+    step.status = AiCommandStep::Status::Pending;
+    m_aiCommandSteps.push_back(std::move(step));
+  }
+
+  if (m_aiCommandSteps.isEmpty()) {
+    appendAiLog(tr("実行可能なコマンドがありませんでした。"));
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(tr("待機中"));
+    return;
+  }
+
+  populateAiCommandList();
+  appendAiLog(tr("%1件のコマンドを受信しました。")
+                   .arg(m_aiCommandSteps.size()));
+
+  bool autoExecutionHandled = false;
+  if (m_aiAutoExecuteCheck && m_aiAutoExecuteCheck->isChecked()) {
+    QStringList blockingReasons;
+    if (shouldAutoExecuteCommands(m_pendingAiCommands, &blockingReasons)) {
+      startAiCommandExecution();
+      autoExecutionHandled = true;
+    } else {
+      for (const QString &reason : blockingReasons)
+        appendAiLog(tr("自動実行を保留しました: %1").arg(reason));
+    }
+  }
+
+  if (!autoExecutionHandled) {
+    if (m_aiStatusLabel)
+      m_aiStatusLabel->setText(
+          tr("%1件のコマンドが保留中です。コマンド実行を押してください。")
+              .arg(m_aiCommandSteps.size()));
+    if (m_aiExecuteButton)
+      m_aiExecuteButton->setEnabled(true);
+  }
+}
+
+bool DicomViewer::shouldAutoExecuteCommands(const QJsonArray &commands,
+                                            QStringList *blockingReasons) const {
+  bool allow = true;
+  const auto appendReason = [&](const QString &reason) {
+    if (blockingReasons && !reason.trimmed().isEmpty())
+      blockingReasons->append(reason.trimmed());
+  };
+
+  for (int i = 0; i < commands.size(); ++i) {
+    const QJsonValue value = commands.at(i);
+    if (!value.isObject()) {
+      allow = false;
+      appendReason(tr("コマンド%1がオブジェクト形式ではありません。")
+                       .arg(i + 1));
+      continue;
+    }
+    const QJsonObject command = value.toObject();
+    const QString action =
+        command.value(QStringLiteral("action")).toString().trimmed();
+    if (action.isEmpty()) {
+      allow = false;
+      appendReason(tr("コマンド%1にactionが指定されていません。")
+                       .arg(i + 1));
+      continue;
+    }
+
+    if (!autoExecutableActions().contains(action)) {
+      allow = false;
+      if (action == QStringLiteral("run_segmentation")) {
+        appendReason(tr("run_segmentationは常に手動確認が必要です。"));
+      } else if (action == QStringLiteral("run_dpsd_analysis")) {
+        appendReason(tr("run_dpsd_analysisは計算コストが高いため手動実行に切り替えました。"));
+      } else if (action == QStringLiteral("calculate_dvh")) {
+        appendReason(tr("calculate_dvhは結果確認が必要なため自動実行しません。"));
+      } else if (action == QStringLiteral("open_dicom_file") ||
+                 action == QStringLiteral("open_dicom_directory")) {
+        appendReason(tr("%1はファイル操作を伴うため手動確認が必要です。")
+                         .arg(action));
+      } else {
+        appendReason(
+            tr("アクション%1は自動実行のホワイトリストに含まれていません。")
+                .arg(action));
+      }
+      continue;
+    }
+
+  }
+
+  if (!allow && blockingReasons && blockingReasons->isEmpty())
+    blockingReasons->append(tr("手動確認が必要なコマンドが含まれています。"));
+  if (blockingReasons)
+    blockingReasons->removeDuplicates();
+  return allow;
+}
+
+void DicomViewer::loadAiMacros() {
+  m_aiMacros.clear();
+  QSettings settings(QStringLiteral("ShioRIS3"), QStringLiteral("ShioRIS3"));
+  settings.beginGroup(QStringLiteral("lmstudio/macros"));
+  const QStringList keys = settings.childKeys();
+  for (const QString &key : keys) {
+    const QString raw = settings.value(key).toString();
+    if (raw.trimmed().isEmpty())
+      continue;
+    QJsonParseError error{};
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8(), &error);
+    if (error.error == QJsonParseError::NoError) {
+      AiMacroDefinition def;
+      if (doc.isArray()) {
+        def.commands = doc.array();
+      } else if (doc.isObject()) {
+        const QJsonObject obj = doc.object();
+        def.commands = obj.value(QStringLiteral("commands")).toArray();
+        def.description =
+            obj.value(QStringLiteral("description")).toString().trimmed();
+        const QJsonArray params =
+            obj.value(QStringLiteral("parameters")).toArray();
+        for (const QJsonValue &param : params) {
+          if (param.isString())
+            def.parameterHints.append(param.toString());
+        }
+      }
+      if (!def.commands.isEmpty()) {
+        if (def.parameterHints.isEmpty()) {
+          QSet<QString> placeholders;
+          for (const QJsonValue &cmd : def.commands)
+            collectMacroPlaceholders(cmd, &placeholders);
+          def.parameterHints = normalizePlaceholderList(placeholders);
+        }
+        m_aiMacros.insert(key, def);
+      }
+    }
+  }
+  settings.endGroup();
+  refreshAiMacroCombo();
+}
+
+void DicomViewer::persistAiMacros() const {
+  QSettings settings(QStringLiteral("ShioRIS3"), QStringLiteral("ShioRIS3"));
+  settings.beginGroup(QStringLiteral("lmstudio/macros"));
+  settings.remove(QString());
+  for (auto it = m_aiMacros.cbegin(); it != m_aiMacros.cend(); ++it) {
+    QJsonObject obj;
+    obj.insert(QStringLiteral("commands"), it.value().commands);
+    if (!it.value().description.trimmed().isEmpty())
+      obj.insert(QStringLiteral("description"), it.value().description);
+    if (!it.value().parameterHints.isEmpty())
+      obj.insert(QStringLiteral("parameters"),
+                 QJsonArray::fromStringList(it.value().parameterHints));
+    const QJsonDocument doc(obj);
+    settings.setValue(it.key(), QString::fromUtf8(
+                                       doc.toJson(QJsonDocument::Compact)));
+  }
+  settings.endGroup();
+}
+
+void DicomViewer::refreshAiMacroCombo() {
+  if (!m_aiMacroCombo)
+    return;
+  const QString previous = m_aiMacroCombo->currentText();
+  m_aiMacroCombo->clear();
+  const QStringList names = m_aiMacros.keys();
+  for (const QString &name : names) {
+    m_aiMacroCombo->addItem(name);
+    const int row = m_aiMacroCombo->findText(name);
+    if (row >= 0) {
+      const QString description = m_aiMacros.value(name).description;
+      if (!description.trimmed().isEmpty())
+        m_aiMacroCombo->setItemData(row, description,
+                                    Qt::ToolTipRole);
+    }
+  }
+  int index = m_aiMacroCombo->findText(previous);
+  if (index >= 0)
+    m_aiMacroCombo->setCurrentIndex(index);
+  else if (!names.isEmpty())
+    m_aiMacroCombo->setCurrentIndex(0);
+  const bool hasMacros = !m_aiMacros.isEmpty();
+  if (m_aiMacroRunButton)
+    m_aiMacroRunButton->setEnabled(hasMacros);
+  if (m_aiMacroDeleteButton)
+    m_aiMacroDeleteButton->setEnabled(hasMacros);
+  if (m_aiMacroExportButton)
+    m_aiMacroExportButton->setEnabled(hasMacros);
+  if (m_aiMacroImportButton)
+    m_aiMacroImportButton->setEnabled(true);
+}
+
+bool DicomViewer::executeAiCommand(const QJsonObject &command) {
+  const QString action = command.value(QStringLiteral("action")).toString();
+  const QJsonObject params =
+      command.value(QStringLiteral("params")).toObject();
+
+  const bool protectRoiList = action != QStringLiteral("open_dicom_file") &&
+                              action != QStringLiteral("open_dicom_directory") &&
+                              action != QStringLiteral("run_segmentation");
+  ScopedRoiUiReadGuard roiGuard(this, protectRoiList);
+
+  if (action.isEmpty()) {
+    appendAiLog(tr("actionが指定されていません。"));
+    return false;
+  }
+
+  if (action == QStringLiteral("zoom_in")) {
+    onZoomIn();
+    appendAiLog(tr("ズームインを実行しました。"));
+    return true;
+  }
+
+  if (action == QStringLiteral("zoom_out")) {
+    onZoomOut();
+    appendAiLog(tr("ズームアウトを実行しました。"));
+    return true;
+  }
+
+  if (action == QStringLiteral("reset_zoom")) {
+    onResetZoom();
+    appendAiLog(tr("ズームをリセットしました。"));
+    return true;
+  }
+
+  if (action == QStringLiteral("fit_to_window")) {
+    onFitToWindow();
+    appendAiLog(tr("画像をウィンドウにフィットさせました。"));
+    return true;
+  }
+
+  if (action == QStringLiteral("set_view_content")) {
+    int targetView = activeOrDefaultViewIndex();
+    const bool viewSpecified = params.contains(QStringLiteral("view"));
+    if (viewSpecified) {
+      int candidate = params.value(QStringLiteral("view")).toInt(targetView);
+      targetView = std::clamp(candidate, 0, VIEW_COUNT - 1);
+      if (!isViewIndexVisible(targetView)) {
+        appendAiLog(tr("ビュー%1は現在のレイアウトでは利用できません。使用可能なビューは%2個です。")
+                        .arg(targetView + 1)
+                        .arg(visibleViewCount()));
+        return false;
+      }
+    }
+    QString content = params.value(QStringLiteral("content")).toString();
+    if (content.trimmed().isEmpty())
+      content = params.value(QStringLiteral("mode")).toString();
+    const QString trimmedContent = content.trimmed();
+    if (trimmedContent.isEmpty()) {
+      appendAiLog(tr("set_view_content: contentが指定されていません。"));
+      return false;
+    }
+    if (!viewSpecified &&
+        trimmedContent.compare(QStringLiteral("dvh"), Qt::CaseInsensitive) ==
+            0) {
+      int dvhView = findVisibleDvhView();
+      if (dvhView >= 0)
+        targetView = dvhView;
+    }
+    if (!isViewIndexVisible(targetView)) {
+      appendAiLog(tr("ビュー%1は現在のレイアウトでは利用できません。使用可能なビューは%2個です。")
+                      .arg(targetView + 1)
+                      .arg(visibleViewCount()));
+      return false;
+    }
+    if (!switchViewContentFromString(targetView, trimmedContent)) {
+      appendAiLog(tr("set_view_content: '%1' への切り替えに失敗しました。")
+                      .arg(trimmedContent));
+      return false;
+    }
+    m_activeViewIndex = targetView;
+    appendAiLog(
+        tr("ビュー%1を%2表示に切り替えました。")
+            .arg(targetView + 1)
+            .arg(trimmedContent));
+    return true;
+  }
+
+  if (action == QStringLiteral("set_image_series")) {
+    if (m_imageSeriesDirs.isEmpty()) {
+      appendAiLog(tr("set_image_series: 切り替え可能なシリーズがありません。"));
+      return false;
+    }
+
+    auto parseIndexValue = [](const QJsonValue &value, bool *ok) -> int {
+      if (ok)
+        *ok = false;
+      if (value.isDouble()) {
+        if (ok)
+          *ok = true;
+        return value.toInt();
+      }
+      if (value.isString()) {
+        bool localOk = false;
+        int parsed = value.toString().toInt(&localOk);
+        if (localOk) {
+          if (ok)
+            *ok = true;
+          return parsed;
+        }
+      }
+      return -1;
+    };
+
+    int targetIndex = -1;
+    QString requestedToken;
+
+    const QJsonValue seriesVal = params.value(QStringLiteral("series"));
+    if (!seriesVal.isUndefined() && !seriesVal.isNull()) {
+      if (seriesVal.isString()) {
+        const QString token = seriesVal.toString().trimmed();
+        if (!token.isEmpty()) {
+          requestedToken = token;
+          const QString lower = token.toLower();
+          if (lower.startsWith(QStringLiteral("image"))) {
+            bool ok = false;
+            const int number = token.mid(5).toInt(&ok);
+            if (ok)
+              targetIndex = number - 1;
+          }
+          if (targetIndex < 0) {
+            bool ok = false;
+            const int numeric = token.toInt(&ok);
+            if (ok)
+              targetIndex = numeric - 1;
+          }
+        }
+      } else if (seriesVal.isDouble()) {
+        targetIndex = seriesVal.toInt() - 1;
+      }
+    }
+
+    bool indexOk = false;
+    if (targetIndex < 0) {
+      const int indexParam =
+          parseIndexValue(params.value(QStringLiteral("index")), &indexOk);
+      if (indexOk)
+        targetIndex = indexParam - 1;
+    }
+
+    QString modalityToken = params.value(QStringLiteral("modality")).toString().trimmed();
+    if (modalityToken.isEmpty() && targetIndex < 0 && !requestedToken.isEmpty())
+      modalityToken = requestedToken;
+
+    if (targetIndex < 0 && !modalityToken.isEmpty()) {
+      const QString desired = modalityToken.trimmed();
+      for (int i = 0; i < m_imageSeriesModalities.size(); ++i) {
+        const QString mod = m_imageSeriesModalities.value(i);
+        if (mod.isEmpty())
+          continue;
+        if (mod.compare(desired, Qt::CaseInsensitive) == 0) {
+          targetIndex = i;
+          break;
+        }
+        if (desired.compare(QStringLiteral("MRI"), Qt::CaseInsensitive) == 0 &&
+            mod.contains(QStringLiteral("MRI"), Qt::CaseInsensitive)) {
+          targetIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (targetIndex < 0) {
+      QString token = modalityToken;
+      if (token.isEmpty())
+        token = requestedToken;
+      appendAiLog(
+          tr("set_image_series: 指定されたシリーズを特定できませんでした: %1")
+              .arg(token.isEmpty() ? tr("不明な指定") : token));
+      return false;
+    }
+
+    if (targetIndex < 0 || targetIndex >= m_imageSeriesDirs.size()) {
+      appendAiLog(tr("set_image_series: 指定された番号が範囲外です: %1")
+                      .arg(targetIndex + 1));
+      return false;
+    }
+
+    if (targetIndex == m_activeImageSeriesIndex) {
+      appendAiLog(tr("Image%1はすでに表示中です。")
+                      .arg(targetIndex + 1));
+      return true;
+    }
+
+    if (!switchToImageSeries(targetIndex)) {
+      appendAiLog(tr("Image%1への切り替えに失敗しました。")
+                      .arg(targetIndex + 1));
+      return false;
+    }
+
+    const QString label = tr("Image%1").arg(targetIndex + 1);
+    const QString modality = m_imageSeriesModalities.value(targetIndex);
+    if (!modality.trimmed().isEmpty()) {
+      appendAiLog(tr("%1 (%2) に切り替えました。")
+                      .arg(label, modality));
+    } else {
+      appendAiLog(tr("%1 に切り替えました。").arg(label));
+    }
+    return true;
+  }
+
+  auto parseJsonInt = [](const QJsonValue &value, bool *ok) -> int {
+    if (ok)
+      *ok = false;
+    if (value.isDouble()) {
+      if (ok)
+        *ok = true;
+      return static_cast<int>(std::round(value.toDouble()));
+    }
+    if (value.isString()) {
+      bool localOk = false;
+      const double parsed = value.toString().toDouble(&localOk);
+      if (localOk) {
+        if (ok)
+          *ok = true;
+        return static_cast<int>(std::round(parsed));
+      }
+    }
+    return 0;
+  };
+
+  auto readFirstInt = [&](const QJsonObject &object,
+                          const std::initializer_list<const char *> &keys,
+                          bool *found) -> int {
+    if (found)
+      *found = false;
+    for (const char *key : keys) {
+      const QString qKey = QString::fromUtf8(key);
+      if (!object.contains(qKey))
+        continue;
+      bool localOk = false;
+      const int value = parseJsonInt(object.value(qKey), &localOk);
+      if (localOk) {
+        if (found)
+          *found = true;
+        return value;
+      }
+    }
+    return 0;
+  };
+
+  const QStringList sliceForwardKeywords = {
+      QStringLiteral("forward"),     QStringLiteral("forwards"),
+      QStringLiteral("next"),        QStringLiteral("advance"),
+      QStringLiteral("advancing"),   QStringLiteral("ahead"),
+      QStringLiteral("increase"),    QStringLiteral("up"),
+      QStringLiteral("+"),           QStringLiteral("次"),
+      QStringLiteral("次へ"),         QStringLiteral("次に"),
+      QStringLiteral("次の"),         QStringLiteral("進め"),
+      QStringLiteral("進める"),       QStringLiteral("進めて"),
+      QStringLiteral("進み"),         QStringLiteral("進む"),
+      QStringLiteral("送る"),         QStringLiteral("送って"),
+      QStringLiteral("送り"),         QStringLiteral("送り出す")};
+
+  const QStringList sliceBackwardKeywords = {
+      QStringLiteral("back"),         QStringLiteral("backward"),
+      QStringLiteral("backwards"),    QStringLiteral("previous"),
+      QStringLiteral("prev"),         QStringLiteral("rewind"),
+      QStringLiteral("rewinding"),    QStringLiteral("behind"),
+      QStringLiteral("decrease"),     QStringLiteral("down"),
+      QStringLiteral("-"),            QStringLiteral("戻す"),
+      QStringLiteral("戻る"),         QStringLiteral("戻って"),
+      QStringLiteral("戻し"),         QStringLiteral("戻り"),
+      QStringLiteral("巻き戻す"),       QStringLiteral("巻き戻して"),
+      QStringLiteral("前へ"),         QStringLiteral("前に"),
+      QStringLiteral("手前"),         QStringLiteral("手前に")};
+
+  auto stringContainsAnyKeyword = [&](const QString &value,
+                                      const QStringList &keywords) -> bool {
+    const QString normalized = value.trimmed().toLower();
+    if (normalized.isEmpty())
+      return false;
+    for (const QString &keyword : keywords) {
+      if (keyword.isEmpty())
+        continue;
+      if (normalized == keyword || normalized.startsWith(keyword) ||
+          normalized.contains(keyword))
+        return true;
+    }
+    return false;
+  };
+
+  auto collectSliceDirectionHints =
+      [&](const QJsonObject &object) -> std::pair<bool, bool> {
+    bool forwardHint = false;
+    bool backwardHint = false;
+    std::function<void(const QJsonValue &)> inspectValue;
+    inspectValue = [&](const QJsonValue &val) {
+      if (val.isString()) {
+        const QString str = val.toString();
+        forwardHint = forwardHint || stringContainsAnyKeyword(str, sliceForwardKeywords);
+        backwardHint =
+            backwardHint || stringContainsAnyKeyword(str, sliceBackwardKeywords);
+      } else if (val.isArray()) {
+        const QJsonArray arr = val.toArray();
+        for (const QJsonValue &child : arr)
+          inspectValue(child);
+      } else if (val.isObject()) {
+        const QJsonObject childObj = val.toObject();
+        for (auto it = childObj.begin(); it != childObj.end(); ++it)
+          inspectValue(it.value());
+      }
+    };
+
+    for (auto it = object.begin(); it != object.end(); ++it) {
+      if (it.key() == QStringLiteral("direction"))
+        continue;
+      inspectValue(it.value());
+    }
+    return {forwardHint, backwardHint};
+  };
+
+  auto handleSliceNavigation = [&](const QString &sliceAction,
+                                   const QJsonObject &sliceParams) -> bool {
+    const bool isAdvance = sliceAction == QStringLiteral("advance_slice");
+
+    int targetView = activeOrDefaultViewIndex();
+    const std::initializer_list<const char *> viewKeys = {
+        "view", "view_index", "target_view", "viewport", "panel",
+        "window"};
+    for (const char *key : viewKeys) {
+      const QString qKey = QString::fromUtf8(key);
+      if (!sliceParams.contains(qKey))
+        continue;
+      bool ok = false;
+      int candidate = parseJsonInt(sliceParams.value(qKey), &ok);
+      if (!ok)
+        continue;
+      if (candidate >= 1 && candidate <= VIEW_COUNT)
+        candidate -= 1;
+      targetView = std::clamp(candidate, 0, VIEW_COUNT - 1);
+      break;
+    }
+
+    if (!isViewIndexVisible(targetView)) {
+      appendAiLog(tr("%1: ビュー%2は現在のレイアウトでは利用できません。使用可能なビューは%3個です。")
+                      .arg(sliceAction)
+                      .arg(targetView + 1)
+                      .arg(visibleViewCount()));
+      return false;
+    }
+
+    if (m_isDVHView[targetView] || m_isProfileView[targetView] ||
+        m_is3DView[targetView]) {
+      appendAiLog(
+          tr("%1: ビュー%2ではスライス操作を実行できません。")
+              .arg(sliceAction)
+              .arg(targetView + 1));
+      return false;
+    }
+
+    if (!m_sliceSliders[targetView]) {
+      appendAiLog(tr("%1: ビュー%2のスライダーにアクセスできません。")
+                      .arg(sliceAction)
+                      .arg(targetView + 1));
+      return false;
+    }
+
+    if (!m_sliceSliders[targetView]->isEnabled()) {
+      appendAiLog(tr("%1: ビュー%2のスライダーが無効化されています。")
+                      .arg(sliceAction)
+                      .arg(targetView + 1));
+      return false;
+    }
+
+    if (!isVolumeLoaded() && m_dicomFiles.isEmpty()) {
+      appendAiLog(tr("%1: スライスが読み込まれていません。")
+                      .arg(sliceAction));
+      return false;
+    }
+
+    const int sliderMin = m_sliceSliders[targetView]->minimum();
+    const int sliderMax = m_sliceSliders[targetView]->maximum();
+    if (sliderMax <= sliderMin && sliderMin == sliderMax) {
+      appendAiLog(tr("%1: ビュー%2で移動可能なスライスがありません。")
+                      .arg(sliceAction)
+                      .arg(targetView + 1));
+      return false;
+    }
+
+    int currentIndex = m_currentIndices[targetView];
+    if (currentIndex < sliderMin || currentIndex > sliderMax)
+      currentIndex = m_sliceSliders[targetView]->value();
+    currentIndex = std::clamp(currentIndex, sliderMin, sliderMax);
+
+    int directionSign = isAdvance ? 1 : -1;
+    const QString directionToken =
+        sliceParams.value(QStringLiteral("direction")).toString();
+    const QString directionLower = directionToken.trimmed().toLower();
+    if (!directionLower.isEmpty()) {
+      if (stringContainsAnyKeyword(directionLower, sliceForwardKeywords)) {
+        directionSign = 1;
+      } else if (stringContainsAnyKeyword(directionLower,
+                                          sliceBackwardKeywords)) {
+        directionSign = -1;
+      } else {
+        appendAiLog(tr("%1: directionパラメータを解釈できません: %2")
+                        .arg(sliceAction, directionToken));
+        return false;
+      }
+    } else {
+      const auto [forwardHint, backwardHint] =
+          collectSliceDirectionHints(sliceParams);
+      if (forwardHint && !backwardHint)
+        directionSign = 1;
+      else if (backwardHint && !forwardHint)
+        directionSign = -1;
+    }
+
+    bool signedOk = false;
+    int signedValue =
+        readFirstInt(sliceParams,
+                     {"offset", "delta", "step", "signed_step", "signed_offset"},
+                     &signedOk);
+
+    bool amountOk = false;
+    int amountValue = readFirstInt(sliceParams,
+                                   {"amount", "count", "slices", "steps",
+                                    "value", "num", "number"},
+                                   &amountOk);
+    if (amountOk && amountValue < 0) {
+      signedOk = true;
+      signedValue = amountValue;
+    }
+
+    int step = 0;
+    if (signedOk) {
+      step = signedValue;
+    } else {
+      int magnitude = amountOk ? std::abs(amountValue) : 10;
+      if (magnitude <= 0)
+        magnitude = 10;
+      step = directionSign * magnitude;
+    }
+
+    if (step == 0) {
+      appendAiLog(tr("%1: スライス移動量が0のため実行しませんでした。")
+                      .arg(sliceAction));
+      return false;
+    }
+
+    const int desiredIndex =
+        std::clamp(currentIndex + step, sliderMin, sliderMax);
+    if (desiredIndex == currentIndex) {
+      if ((step > 0 && currentIndex == sliderMax) ||
+          (step < 0 && currentIndex == sliderMin)) {
+        appendAiLog(tr("%1: ビュー%2はすでに端のスライスです（現在%3/%4）。")
+                        .arg(sliceAction)
+                        .arg(targetView + 1)
+                        .arg(currentIndex - sliderMin + 1)
+                        .arg(sliderMax - sliderMin + 1));
+      } else {
+        appendAiLog(tr("%1: 指定された移動量を適用できませんでした。")
+                        .arg(sliceAction));
+      }
+      return false;
+    }
+
+    {
+      QSignalBlocker blocker(m_sliceSliders[targetView]);
+      m_sliceSliders[targetView]->setValue(desiredIndex);
+    }
+
+    m_activeViewIndex = targetView;
+    loadSlice(targetView, desiredIndex);
+    updateSliceLabels();
+
+    const int actualStep = desiredIndex - currentIndex;
+    appendAiLog(tr("ビュー%1のスライスを%2枚%3（現在%4/%5）。")
+                    .arg(targetView + 1)
+                    .arg(std::abs(actualStep))
+                    .arg(actualStep > 0 ? tr("進めました") : tr("戻しました"))
+                    .arg(desiredIndex - sliderMin + 1)
+                    .arg(sliderMax - sliderMin + 1));
+    return true;
+  };
+
+  if (action == QStringLiteral("advance_slice") ||
+      action == QStringLiteral("rewind_slice")) {
+    return handleSliceNavigation(action, params);
+  }
+
+
+  if (action == QStringLiteral("pan")) {
+    int targetView = activeOrDefaultViewIndex();
+    if (params.contains(QStringLiteral("view"))) {
+      int candidate = params.value(QStringLiteral("view")).toInt(targetView);
+      targetView = std::clamp(candidate, 0, VIEW_COUNT - 1);
+    }
+
+    if (!isViewIndexVisible(targetView)) {
+      appendAiLog(tr("ビュー%1は現在のレイアウトでは利用できません。使用可能なビューは%2個です。")
+                      .arg(targetView + 1)
+                      .arg(visibleViewCount()));
+      return false;
+    }
+
+    if (m_isDVHView[targetView] || m_isProfileView[targetView]) {
+      appendAiLog(tr("pan: ビュー%1ではパン操作を実行できません。")
+                      .arg(targetView + 1));
+      return false;
+    }
+
+    QWidget *widget = nullptr;
+    if (m_is3DView[targetView]) {
+      if (targetView >= 0 && targetView < VIEW_COUNT)
+        widget = m_3dWidgets[targetView];
+    } else if (targetView >= 0 && targetView < VIEW_COUNT) {
+      widget = m_imageWidgets[targetView];
+    }
+
+    if (!widget) {
+      appendAiLog(tr("pan: ビュー%1のウィジェットが無効です。")
+                      .arg(targetView + 1));
+      return false;
+    }
+
+    const QString directionToken =
+        params.value(QStringLiteral("direction")).toString();
+    const QString directionLower = directionToken.trimmed().toLower();
+    auto containsAnyKey = [&](const std::initializer_list<const char *> &keys) {
+      for (const char *key : keys) {
+        if (params.contains(QString::fromUtf8(key)))
+          return true;
+      }
+      return false;
+    };
+    auto matchesPanToken = [&](const QStringList &aliases) {
+      if (directionLower.isEmpty())
+        return false;
+      for (const QString &alias : aliases) {
+        if (directionLower == alias)
+          return true;
+      }
+      return false;
+    };
+
+    int forwardScore = 0;
+    int backwardScore = 0;
+    if (!directionLower.isEmpty()) {
+      if (stringContainsAnyKeyword(directionLower, sliceForwardKeywords))
+        forwardScore += 2;
+      if (stringContainsAnyKeyword(directionLower, sliceBackwardKeywords))
+        backwardScore += 2;
+    }
+
+    const auto [forwardHintFromParams, backwardHintFromParams] =
+        collectSliceDirectionHints(params);
+    if (forwardHintFromParams)
+      forwardScore += 1;
+    if (backwardHintFromParams)
+      backwardScore += 1;
+
+    bool signedOkForPan = false;
+    const int signedValueForPan = readFirstInt(
+        params,
+        {"offset", "delta", "step", "signed_step", "signed_offset"},
+        &signedOkForPan);
+    if (signedOkForPan) {
+      if (signedValueForPan > 0)
+        forwardScore += 1;
+      else if (signedValueForPan < 0)
+        backwardScore += 1;
+    }
+
+    bool amountOkForPan = false;
+    const int amountValueForPan = readFirstInt(
+        params, {"amount", "count", "slices", "steps", "value", "num",
+                 "number"},
+        &amountOkForPan);
+    if (amountOkForPan) {
+      if (amountValueForPan > 0)
+        forwardScore += 1;
+      else if (amountValueForPan < 0)
+        backwardScore += 1;
+    }
+
+    const bool directionLooksPan = matchesPanToken(
+        {QStringLiteral("up"), QStringLiteral("u"), QStringLiteral("north"),
+         QStringLiteral("上"), QStringLiteral("down"), QStringLiteral("d"),
+         QStringLiteral("south"), QStringLiteral("下"),
+         QStringLiteral("left"), QStringLiteral("l"), QStringLiteral("west"),
+         QStringLiteral("左"), QStringLiteral("right"), QStringLiteral("r"),
+         QStringLiteral("east"), QStringLiteral("右")});
+
+    const bool hasSliceMagnitudeKeys = containsAnyKey(
+        {"amount", "count", "slices", "steps", "value", "num", "number",
+         "offset", "delta", "step", "signed_step", "signed_offset"});
+
+    const bool sliceKeywordDetected = forwardScore > 0 || backwardScore > 0;
+
+    if (sliceKeywordDetected || (hasSliceMagnitudeKeys && !directionLooksPan)) {
+      QString fallbackAction;
+      if (forwardScore > backwardScore)
+        fallbackAction = QStringLiteral("advance_slice");
+      else if (backwardScore > forwardScore)
+        fallbackAction = QStringLiteral("rewind_slice");
+      else
+        fallbackAction = backwardScore > 0 ? QStringLiteral("rewind_slice")
+                                           : QStringLiteral("advance_slice");
+
+      if (sliceKeywordDetected) {
+        appendAiLog(
+            tr("pan: '進める' や '戻す' などスライス移動を示す語句を検出したため、%1として処理します。")
+                .arg(fallbackAction));
+      } else {
+        appendAiLog(tr("pan: スライス移動量の指定が含まれていたため、%1として処理します。")
+                        .arg(fallbackAction));
+      }
+      return handleSliceNavigation(fallbackAction, params);
+    }
+
+    auto parseDoubleValue = [](const QJsonValue &value, bool *ok) -> double {
+      if (ok)
+        *ok = false;
+      if (value.isDouble()) {
+        if (ok)
+          *ok = true;
+        return value.toDouble();
+      }
+      if (value.isString()) {
+        bool localOk = false;
+        double parsed = value.toString().toDouble(&localOk);
+        if (localOk) {
+          if (ok)
+            *ok = true;
+          return parsed;
+        }
+      }
+      return 0.0;
+    };
+
+    double percent = 25.0;
+    bool amountOk = false;
+    const double requestedPercent =
+        parseDoubleValue(params.value(QStringLiteral("amount_percent")),
+                         &amountOk);
+    if (amountOk)
+      percent = requestedPercent;
+
+    bool xPercentOk = false;
+    bool yPercentOk = false;
+    const double xPercent =
+        parseDoubleValue(params.value(QStringLiteral("x_percent")),
+                         &xPercentOk);
+    const double yPercent =
+        parseDoubleValue(params.value(QStringLiteral("y_percent")),
+                         &yPercentOk);
+
+    bool xPixelsOk = false;
+    bool yPixelsOk = false;
+    const double xPixels =
+        parseDoubleValue(params.value(QStringLiteral("x_pixels")), &xPixelsOk);
+    const double yPixels =
+        parseDoubleValue(params.value(QStringLiteral("y_pixels")), &yPixelsOk);
+
+    double dx = 0.0;
+    double dy = 0.0;
+    bool usedExplicit = false;
+
+    if (xPercentOk)
+      dx += widget->width() * (xPercent / 100.0);
+    if (yPercentOk)
+      dy += widget->height() * (yPercent / 100.0);
+    usedExplicit = xPercentOk || yPercentOk;
+
+    if (xPixelsOk) {
+      dx += xPixels;
+      usedExplicit = true;
+    }
+    if (yPixelsOk) {
+      dy += yPixels;
+      usedExplicit = true;
+    }
+
+    if (!usedExplicit) {
+      if (directionToken.isEmpty()) {
+        appendAiLog(tr("pan: directionが指定されていません。"));
+        return false;
+      }
+
+      const double horizontal = widget->width() * (percent / 100.0);
+      const double vertical = widget->height() * (percent / 100.0);
+
+      auto directionMatches = [&](const QStringList &aliases) {
+        for (const QString &alias : aliases) {
+          if (directionToken == alias)
+            return true;
+        }
+        return false;
+      };
+
+      QString directionLabel;
+      if (directionMatches({QStringLiteral("up"), QStringLiteral("u"),
+                            QStringLiteral("north"), QStringLiteral("上")})) {
+        dy -= vertical;
+        directionLabel = tr("上");
+      } else if (directionMatches({QStringLiteral("down"), QStringLiteral("d"),
+                                   QStringLiteral("south"),
+                                   QStringLiteral("下")})) {
+        dy += vertical;
+        directionLabel = tr("下");
+      } else if (directionMatches({QStringLiteral("left"), QStringLiteral("l"),
+                                   QStringLiteral("west"),
+                                   QStringLiteral("左")})) {
+        dx -= horizontal;
+        directionLabel = tr("左");
+      } else if (directionMatches({QStringLiteral("right"),
+                                   QStringLiteral("r"),
+                                   QStringLiteral("east"),
+                                   QStringLiteral("右")})) {
+        dx += horizontal;
+        directionLabel = tr("右");
+      } else {
+        appendAiLog(tr("pan: 未対応のdirectionです: %1").arg(directionToken));
+        return false;
+      }
+
+      m_panOffsets[targetView] += QPointF(dx, dy);
+
+      if (m_is3DView[targetView]) {
+        if (!m_3dWidgets[targetView]) {
+          appendAiLog(tr("pan: 3Dビューのパン更新に失敗しました。"));
+          return false;
+        }
+        m_3dWidgets[targetView]->setPan(m_panOffsets[targetView]);
+      } else {
+        if (!m_imageWidgets[targetView]) {
+          appendAiLog(tr("pan: 画像ビューのパン更新に失敗しました。"));
+          return false;
+        }
+        m_imageWidgets[targetView]->setPan(m_panOffsets[targetView]);
+      }
+
+      appendAiLog(tr("ビュー%1を%2方向にパンしました（約%3%）。")
+                      .arg(targetView + 1)
+                      .arg(directionLabel)
+                      .arg(QString::number(percent, 'f', 1)));
+      return true;
+    }
+
+    if (dx == 0.0 && dy == 0.0) {
+      appendAiLog(tr("pan: パン量が0のため操作を実行しませんでした。"));
+      return false;
+    }
+
+    m_panOffsets[targetView] += QPointF(dx, dy);
+
+    if (m_is3DView[targetView]) {
+      if (!m_3dWidgets[targetView]) {
+        appendAiLog(tr("pan: 3Dビューのパン更新に失敗しました。"));
+        return false;
+      }
+      m_3dWidgets[targetView]->setPan(m_panOffsets[targetView]);
+    } else {
+      if (!m_imageWidgets[targetView]) {
+        appendAiLog(tr("pan: 画像ビューのパン更新に失敗しました。"));
+        return false;
+      }
+      m_imageWidgets[targetView]->setPan(m_panOffsets[targetView]);
+    }
+
+    appendAiLog(tr("ビュー%1を水平%2ピクセル、垂直%3ピクセルパンしました。")
+                    .arg(targetView + 1)
+                    .arg(QString::number(dx, 'f', 1))
+                    .arg(QString::number(dy, 'f', 1)));
+    return true;
+  }
+
+  if (action == QStringLiteral("calculate_dvh")) {
+    QStringList roiNames;
+    const QString singleRoi = params.value(QStringLiteral("roi")).toString();
+    if (!singleRoi.trimmed().isEmpty())
+      roiNames << singleRoi.trimmed();
+    const QJsonValue roisVal = params.value(QStringLiteral("rois"));
+    if (roisVal.isArray()) {
+      const QJsonArray arr = roisVal.toArray();
+      for (const QJsonValue &val : arr) {
+        const QString name = val.toString().trimmed();
+        if (!name.isEmpty())
+          roiNames << name;
+      }
+    } else if (roisVal.isString()) {
+      const QString name = roisVal.toString().trimmed();
+      if (!name.isEmpty())
+        roiNames << name;
+    }
+    if (roiNames.isEmpty()) {
+      appendAiLog(tr("calculate_dvh: ROIが指定されていません。"));
+      return false;
+    }
+
+    QStringList metrics;
+    const QJsonValue metricsVal = params.value(QStringLiteral("metrics"));
+    if (metricsVal.isArray()) {
+      const QJsonArray arr = metricsVal.toArray();
+      for (const QJsonValue &val : arr) {
+        const QString metric = val.toString().trimmed();
+        if (!metric.isEmpty())
+          metrics << metric;
+      }
+    } else if (metricsVal.isString()) {
+      const QString metric = metricsVal.toString().trimmed();
+      if (!metric.isEmpty())
+        metrics << metric;
+    }
+    if (metrics.isEmpty())
+      metrics << QStringLiteral("D95");
+
+    bool showView = !params.contains(QStringLiteral("show_view")) ||
+                    params.value(QStringLiteral("show_view")).toBool();
+    int targetView = activeOrDefaultViewIndex();
+    if (params.contains(QStringLiteral("view"))) {
+      int candidate = params.value(QStringLiteral("view")).toInt(targetView);
+      targetView = std::clamp(candidate, 0, VIEW_COUNT - 1);
+    }
+
+    QStringList summaries;
+    bool successAny = false;
+    for (const QString &roiName : roiNames) {
+      int roiIndex = findRoiIndex(roiName);
+      if (roiIndex < 0) {
+        summaries << tr("ROI '%1' が見つかりません。")
+                          .arg(roiName);
+        continue;
+      }
+      DVHCalculator::DVHData *dataPtr = nullptr;
+      if (!ensureDvhDataReady(roiIndex, &dataPtr) || !dataPtr)
+        continue;
+      QString metricSummary = formatDvhMetrics(*dataPtr, metrics);
+      if (metricSummary.isEmpty())
+        metricSummary = tr("DVHを計算しました。");
+      else
+        metricSummary = tr("指標: %1").arg(metricSummary);
+      summaries << tr("ROI '%1': %2").arg(roiName, metricSummary);
+      for (int i = 0; i < VIEW_COUNT; ++i) {
+        if (m_dvhWidgets[i])
+          m_dvhWidgets[i]->setROIChecked(roiName, true);
+      }
+      successAny = true;
+    }
+
+    if (!summaries.isEmpty())
+      appendAiLog(summaries.join(QStringLiteral("\n")));
+
+    if (successAny && showView) {
+      const bool viewSpecified = params.contains(QStringLiteral("view"));
+      if (viewSpecified && !isViewIndexVisible(targetView)) {
+        appendAiLog(tr("ビュー%1は現在のレイアウトでは利用できません。使用可能なビューは%2個です。")
+                        .arg(targetView + 1)
+                        .arg(visibleViewCount()));
+      } else {
+        if (!viewSpecified) {
+          int dvhView = findVisibleDvhView();
+          if (dvhView >= 0)
+            targetView = dvhView;
+        }
+        if (!isViewIndexVisible(targetView)) {
+          appendAiLog(tr("ビュー%1は現在のレイアウトでは利用できません。使用可能なビューは%2個です。")
+                          .arg(targetView + 1)
+                          .arg(visibleViewCount()));
+        } else {
+          m_activeViewIndex = targetView;
+          switchViewContentFromString(targetView, QStringLiteral("dvh"));
+        }
+      }
+    }
+    return successAny;
+  }
+
+  if (action == QStringLiteral("run_dpsd_analysis")) {
+    const QString roiName = params.value(QStringLiteral("roi")).toString().trimmed();
+    if (roiName.isEmpty()) {
+      appendAiLog(tr("run_dpsd_analysis: roiが指定されていません。"));
+      return false;
+    }
+    const QString sampleName =
+        params.value(QStringLiteral("sample_roi")).toString().trimmed();
+    double startMm = params.value(QStringLiteral("start_mm")).toDouble(-20.0);
+    double endMm = params.value(QStringLiteral("end_mm")).toDouble(50.0);
+    QString modeStr = params.value(QStringLiteral("mode")).toString().toLower();
+    DPSDCalculator::Mode mode = DPSDCalculator::Mode::Mode3D;
+    if (modeStr == QStringLiteral("2d"))
+      mode = DPSDCalculator::Mode::Mode2D;
+
+    bool ok = runDpsdAnalysis(roiName, sampleName, startMm, endMm, mode);
+    if (ok) {
+      bool showView = !params.contains(QStringLiteral("show_view")) ||
+                      params.value(QStringLiteral("show_view")).toBool();
+      if (showView) {
+        int targetView = activeOrDefaultViewIndex();
+        if (params.contains(QStringLiteral("view"))) {
+          int candidate = params.value(QStringLiteral("view")).toInt(targetView);
+          targetView = std::clamp(candidate, 0, VIEW_COUNT - 1);
+          if (!isViewIndexVisible(targetView)) {
+            appendAiLog(tr("ビュー%1は現在のレイアウトでは利用できません。使用可能なビューは%2個です。")
+                            .arg(targetView + 1)
+                            .arg(visibleViewCount()));
+            return ok;
+          }
+        }
+        if (!isViewIndexVisible(targetView)) {
+          appendAiLog(tr("ビュー%1は現在のレイアウトでは利用できません。使用可能なビューは%2個です。")
+                          .arg(targetView + 1)
+                          .arg(visibleViewCount()));
+        } else {
+          m_activeViewIndex = targetView;
+          switchViewContentFromString(targetView,
+                                      QStringLiteral("profile"));
+        }
+      }
+    }
+    return ok;
+  }
+
+  if (action == QStringLiteral("open_dicom_file")) {
+    roiGuard.release();
+    const QString path = params.value(QStringLiteral("path")).toString();
+    if (path.isEmpty()) {
+      appendAiLog(tr("open_dicom_file: pathが空です。"));
+      return false;
+    }
+    QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) {
+      appendAiLog(tr("指定されたファイルが見つかりません: %1").arg(path));
+      return false;
+    }
+    if (loadDicomFile(info.absoluteFilePath())) {
+      appendAiLog(tr("DICOMファイルを読み込みました: %1")
+                      .arg(info.absoluteFilePath()));
+      return true;
+    }
+    appendAiLog(tr("DICOMファイルの読み込みに失敗しました: %1")
+                    .arg(info.absoluteFilePath()));
+    return false;
+  }
+
+  if (action == QStringLiteral("open_dicom_directory")) {
+    roiGuard.release();
+    const QString path = params.value(QStringLiteral("path")).toString();
+    if (path.isEmpty()) {
+      appendAiLog(tr("open_dicom_directory: pathが空です。"));
+      return false;
+    }
+    QDir dir(path);
+    if (!dir.exists()) {
+      appendAiLog(tr("指定されたディレクトリが見つかりません: %1").arg(path));
+      return false;
+    }
+    if (loadDicomDirectory(dir.absolutePath())) {
+      appendAiLog(tr("DICOMディレクトリを読み込みました: %1")
+                      .arg(dir.absolutePath()));
+      return true;
+    }
+    appendAiLog(tr("DICOMディレクトリの読み込みに失敗しました: %1")
+                    .arg(dir.absolutePath()));
+    return false;
+  }
+
+  if (action == QStringLiteral("set_view_mode")) {
+    const QString mode = params.value(QStringLiteral("mode")).toString().toLower();
+    if (mode == QStringLiteral("single")) {
+      setViewMode(ViewMode::Single);
+    } else if (mode == QStringLiteral("dual")) {
+      setViewMode(ViewMode::Dual);
+    } else if (mode == QStringLiteral("quad")) {
+      setViewMode(ViewMode::Quad);
+    } else if (mode == QStringLiteral("five")) {
+      setViewMode(ViewMode::Five);
+    } else {
+      appendAiLog(tr("set_view_mode: 未対応のmodeです: %1").arg(mode));
+      return false;
+    }
+    appendAiLog(tr("ビュー構成を%1に変更しました。")
+                    .arg(mode));
+    return true;
+  }
+
+  if (action == QStringLiteral("run_segmentation")) {
+    roiGuard.release();
+#ifdef USE_ONNXRUNTIME
+    if (m_runSegButton && m_runSegButton->isEnabled()) {
+      onRunSegmentation();
+      appendAiLog(tr("セグメンテーションを実行しました。"));
+      return true;
+    }
+    appendAiLog(tr("セグメンテーションを実行できません。モデルが未読み込みです。"));
+    return false;
+#else
+    appendAiLog(tr("このビルドではセグメンテーション機能が無効です。"));
+    return false;
+#endif
+  }
+
+  if (action == QStringLiteral("show_message")) {
+    const QString message = params.value(QStringLiteral("message")).toString();
+    if (message.isEmpty())
+      return false;
+    appendAiLog(tr("LLMメッセージ: %1").arg(message));
+    return true;
+  }
+
+  appendAiLog(tr("未対応のアクションです: %1").arg(action));
+  recordAiPromptFailure(QStringLiteral("unknown_action"), action);
+  return false;
+}
+
+QString DicomViewer::sanitizeAiJsonText(const QString &rawText) const {
+  QString cleaned = rawText.trimmed();
+  if (cleaned.startsWith(QStringLiteral("```"))) {
+    const int firstNewline = cleaned.indexOf(QLatin1Char('\n'));
+    const int lastFence = cleaned.lastIndexOf(QStringLiteral("```"));
+    if (firstNewline >= 0 && lastFence > firstNewline) {
+      cleaned = cleaned.mid(firstNewline + 1,
+                            lastFence - firstNewline - 1)
+                    .trimmed();
+    } else {
+      cleaned = cleaned.remove(QStringLiteral("```"));
+    }
+  }
+  const int firstBrace = cleaned.indexOf(QLatin1Char('{'));
+  const int lastBrace = cleaned.lastIndexOf(QLatin1Char('}'));
+  if (firstBrace >= 0 && lastBrace >= firstBrace)
+    cleaned = cleaned.mid(firstBrace, lastBrace - firstBrace + 1);
+  return cleaned;
+}
+
+bool DicomViewer::isAiPromptOutdated(const QString &prompt) const {
+  const QString trimmed = prompt.trimmed();
+  if (trimmed.isEmpty())
+    return true;
+
+  const QStringList requiredPhrases = {
+      QStringLiteral(u"System Prompt v7"),
+      QStringLiteral(u"## Your Role"),
+      QStringLiteral(u"## Core Principles"),
+      QStringLiteral(u"## Response Format (MANDATORY)"),
+      QStringLiteral(u"Image Series Switching"),
+      QStringLiteral(u"Slice Navigation"),
+      QStringLiteral(u"set_image_series"),
+      QStringLiteral(u"pan"),
+      QStringLiteral(u"advance_slice"),
+      QStringLiteral(u"rewind_slice"),
+      QStringLiteral(u"show_message"),
+      QStringLiteral(u"run_segmentation"),
+      QStringLiteral(u"run_dpsd_analysis"),
+      QStringLiteral(u"Auto-Execution Policy"),
+      QStringLiteral(u"{{VIEWER_CONTEXT_JSON}}"),
+      QStringLiteral(u"{{PROMPT_FEEDBACK}}")};
+
+  for (const QString &phrase : requiredPhrases) {
+    if (!trimmed.contains(phrase, Qt::CaseInsensitive))
+      return true;
+  }
+  return false;
+}
+
+bool DicomViewer::ensureDvhDataReady(int roiIndex,
+                                     DVHCalculator::DVHData **outData) {
+  if (!isVolumeLoaded() || !m_doseLoaded || !m_rtstructLoaded ||
+      !m_resampledDose.isResampled()) {
+    appendAiLog(tr("DVH計算に必要なデータが読み込まれていません。"));
+    return false;
+  }
+  if (roiIndex < 0 || roiIndex >= m_rtstruct.roiCount()) {
+    appendAiLog(tr("ROIインデックス%1が範囲外です。")
+                    .arg(roiIndex));
+    return false;
+  }
+  if (m_dvhWatchers.contains(roiIndex)) {
+    appendAiLog(tr("ROI %1 のDVH計算が進行中です。完了を待ってください。")
+                    .arg(m_rtstruct.roiName(roiIndex)));
+    return false;
+  }
+
+  if (static_cast<size_t>(m_rtstruct.roiCount()) > m_dvhData.size())
+    m_dvhData.resize(m_rtstruct.roiCount());
+
+  if (m_dvhData[roiIndex].points.empty()) {
+    double maxDose = m_resampledDose.maxDose();
+    double binSize = maxDose > 0.0 ? maxDose / 200.0 : 0.25;
+    try {
+      auto data = DVHCalculator::calculateSingleROI(
+          m_volume, m_resampledDose, m_rtstruct, roiIndex, binSize, nullptr, {});
+      data.isVisible = true;
+      m_dvhData[roiIndex] = std::move(data);
+    } catch (const std::exception &e) {
+      appendAiLog(tr("DVH計算中に例外が発生しました: %1")
+                      .arg(QString::fromUtf8(e.what())));
+      return false;
+    }
+  } else {
+    m_dvhData[roiIndex].isVisible = true;
+  }
+
+  refreshDvhWidgets();
+  if (outData)
+    *outData = &m_dvhData[roiIndex];
+  return true;
+}
+
+int DicomViewer::findRoiIndex(const QString &roiName) const {
+  if (!m_rtstructLoaded)
+    return -1;
+  for (int i = 0; i < m_rtstruct.roiCount(); ++i) {
+    if (m_rtstruct.roiName(i).compare(roiName, Qt::CaseInsensitive) == 0)
+      return i;
+  }
+  return -1;
+}
+
+double DicomViewer::doseAtVolumePercent(const DVHCalculator::DVHData &data,
+                                        double volumePercent) const {
+  if (data.points.empty())
+    return 0.0;
+  const auto &pts = data.points;
+  if (volumePercent >= pts.front().volume)
+    return pts.front().dose;
+  if (volumePercent <= pts.back().volume)
+    return pts.back().dose;
+  for (size_t i = 1; i < pts.size(); ++i) {
+    double v0 = pts[i - 1].volume;
+    double v1 = pts[i].volume;
+    if (v0 >= volumePercent && v1 <= volumePercent) {
+      double d0 = pts[i - 1].dose;
+      double d1 = pts[i].dose;
+      double t = (v0 - volumePercent) / (v0 - v1);
+      return d0 + t * (d1 - d0);
+    }
+  }
+  return pts.back().dose;
+}
+
+double DicomViewer::volumeAtDoseGy(const DVHCalculator::DVHData &data,
+                                   double doseGy) const {
+  if (data.points.empty())
+    return 0.0;
+  const auto &pts = data.points;
+  if (doseGy <= pts.front().dose)
+    return pts.front().volume;
+  if (doseGy >= pts.back().dose)
+    return pts.back().volume;
+  for (size_t i = 1; i < pts.size(); ++i) {
+    double d0 = pts[i - 1].dose;
+    double d1 = pts[i].dose;
+    if (d0 <= doseGy && d1 >= doseGy) {
+      double v0 = pts[i - 1].volume;
+      double v1 = pts[i].volume;
+      double t = (doseGy - d0) / (d1 - d0);
+      return v0 + t * (v1 - v0);
+    }
+  }
+  return 0.0;
+}
+
+QString DicomViewer::formatDvhMetrics(const DVHCalculator::DVHData &data,
+                                      const QStringList &metrics) const {
+  if (metrics.isEmpty())
+    return QString();
+  QStringList parts;
+  for (const QString &metric : metrics) {
+    const QString trimmed = metric.trimmed();
+    if (trimmed.isEmpty())
+      continue;
+    const QString lower = trimmed.toLower();
+    if (lower.startsWith(QLatin1Char('d')) && lower.length() > 1) {
+      bool ok = false;
+      double vol = trimmed.mid(1).toDouble(&ok);
+      if (ok) {
+        double val = doseAtVolumePercent(data, vol);
+        parts << QStringLiteral("%1=%2 Gy")
+                      .arg(trimmed.toUpper(),
+                           QString::number(val, 'f', 2));
+      }
+    } else if (lower.startsWith(QLatin1Char('v')) && lower.length() > 1) {
+      bool ok = false;
+      double dose = trimmed.mid(1).toDouble(&ok);
+      if (ok) {
+        double vol = volumeAtDoseGy(data, dose);
+        parts << QStringLiteral("%1=%2%%")
+                      .arg(trimmed.toUpper(),
+                           QString::number(vol, 'f', 1));
+      }
+    } else if (lower == QStringLiteral("dmean") ||
+               lower == QStringLiteral("mean")) {
+      parts << QStringLiteral("DMEAN=%1 Gy")
+                    .arg(QString::number(data.meanDose, 'f', 2));
+    } else if (lower == QStringLiteral("dmax") ||
+               lower == QStringLiteral("max")) {
+      parts << QStringLiteral("DMAX=%1 Gy")
+                    .arg(QString::number(data.maxDose, 'f', 2));
+    } else if (lower == QStringLiteral("dmin") ||
+               lower == QStringLiteral("min")) {
+      parts << QStringLiteral("DMIN=%1 Gy")
+                    .arg(QString::number(data.minDose, 'f', 2));
+    }
+  }
+  return parts.join(QStringLiteral(", "));
+}
+
+void DicomViewer::refreshDvhWidgets() {
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (!m_dvhWidgets[i])
+      continue;
+    m_dvhWidgets[i]->setDVHData(m_dvhData);
+    m_dvhWidgets[i]->setPatientInfo(patientInfoText());
+    m_dvhWidgets[i]->setPrescriptionDose(m_doseReference);
+  }
+}
+
+bool DicomViewer::runDpsdAnalysis(const QString &roiName,
+                                   const QString &sampleRoiName,
+                                   double startMm, double endMm,
+                                   DPSDCalculator::Mode mode) {
+  if (!isVolumeLoaded() || !m_doseLoaded || !m_rtstructLoaded ||
+      !m_resampledDose.isResampled()) {
+    appendAiLog(tr("DPSD解析に必要なデータが読み込まれていません。"));
+    return false;
+  }
+  if (startMm >= endMm) {
+    appendAiLog(tr("開始距離は終了距離より小さくなければなりません。"));
+    return false;
+  }
+  int roiIndex = findRoiIndex(roiName);
+  if (roiIndex < 0) {
+    appendAiLog(tr("ROI '%1' が見つかりません。")
+                    .arg(roiName));
+    return false;
+  }
+  int sampleIndex = -1;
+  if (!sampleRoiName.trimmed().isEmpty()) {
+    sampleIndex = findRoiIndex(sampleRoiName);
+    if (sampleIndex < 0) {
+      appendAiLog(tr("サンプルROI '%1' が見つかりません。")
+                      .arg(sampleRoiName));
+      return false;
+    }
+  }
+
+  DPSDCalculator::Result roiResult;
+  DPSDCalculator::Result sampleResult;
+  try {
+    roiResult = DPSDCalculator::calculate(m_volume, m_resampledDose, m_rtstruct,
+                                          roiIndex, startMm, endMm, 2.0, mode,
+                                          -1, nullptr);
+    if (sampleIndex >= 0) {
+      sampleResult = DPSDCalculator::calculate(
+          m_volume, m_resampledDose, m_rtstruct, roiIndex, startMm, endMm, 2.0,
+          mode, sampleIndex, nullptr);
+    }
+  } catch (const std::exception &e) {
+    appendAiLog(tr("DPSD計算中に例外が発生しました: %1")
+                    .arg(QString::fromUtf8(e.what())));
+    return false;
+  }
+
+  if (roiResult.distancesMm.empty()) {
+    appendAiLog(tr("DPSD計算結果が空でした。"));
+    return false;
+  }
+
+  QStringList lines;
+  lines << tr("DPSD解析結果: ROI=%1, モード=%2")
+               .arg(roiName,
+                    mode == DPSDCalculator::Mode::Mode2D ? QStringLiteral("2D")
+                                                         : QStringLiteral("3D"));
+  lines << tr("距離範囲: %1 mm ～ %2 mm (ステップ 2.0 mm)")
+               .arg(QString::number(startMm, 'f', 1),
+                    QString::number(endMm, 'f', 1));
+  if (sampleIndex >= 0) {
+    lines << tr("サンプルROI: %1").arg(sampleRoiName);
+  }
+
+  const int count = static_cast<int>(roiResult.distancesMm.size());
+  const int samples = std::clamp(count / 6, 1, std::max(1, count));
+  for (int i = 0; i < count; i += samples) {
+    double dist = roiResult.distancesMm[static_cast<size_t>(i)];
+    double dmin = roiResult.minDoseGy[static_cast<size_t>(i)];
+    double dmax = roiResult.maxDoseGy[static_cast<size_t>(i)];
+    double dmean = roiResult.meanDoseGy[static_cast<size_t>(i)];
+    QString line =
+        tr("距離%1mm: min=%2 Gy, max=%3 Gy, mean=%4 Gy")
+            .arg(QString::number(dist, 'f', 1),
+                 QString::number(dmin, 'f', 2),
+                 QString::number(dmax, 'f', 2),
+                 QString::number(dmean, 'f', 2));
+    if (!sampleResult.distancesMm.empty() &&
+        sampleResult.distancesMm.size() == roiResult.distancesMm.size()) {
+      double smean = sampleResult.meanDoseGy[static_cast<size_t>(i)];
+      line += tr(" (sample mean=%1 Gy)")
+                  .arg(QString::number(smean, 'f', 2));
+    }
+    lines << line;
+  }
+  // ensure最後のサンプルが含まれる
+  if ((count - 1) % samples != 0) {
+    int i = count - 1;
+    double dist = roiResult.distancesMm[static_cast<size_t>(i)];
+    double dmin = roiResult.minDoseGy[static_cast<size_t>(i)];
+    double dmax = roiResult.maxDoseGy[static_cast<size_t>(i)];
+    double dmean = roiResult.meanDoseGy[static_cast<size_t>(i)];
+    QString line =
+        tr("距離%1mm: min=%2 Gy, max=%3 Gy, mean=%4 Gy")
+            .arg(QString::number(dist, 'f', 1),
+                 QString::number(dmin, 'f', 2),
+                 QString::number(dmax, 'f', 2),
+                 QString::number(dmean, 'f', 2));
+    if (!sampleResult.distancesMm.empty() &&
+        sampleResult.distancesMm.size() == roiResult.distancesMm.size()) {
+      double smean = sampleResult.meanDoseGy.back();
+      line += tr(" (sample mean=%1 Gy)")
+                  .arg(QString::number(smean, 'f', 2));
+    }
+    lines << line;
+  }
+
+  appendAiLog(lines.join(QStringLiteral("\n")));
+  return true;
+}
+
+void DicomViewer::mouseReleaseEvent(QMouseEvent *event) {
+  if (m_selectingProfileLine && m_profileLineHasStart &&
+      event->button() == Qt::LeftButton) {
+    int view = viewIndexFromGlobalPos(event->globalPosition().toPoint());
+    if (view == m_profileLineView) {
+      QPoint wpos = m_imageWidgets[view]->mapFromGlobal(
+          event->globalPosition().toPoint());
+      QVector3D patient = patientCoordinateAt(view, wpos);
+      if (!std::isnan(patient.x()))
+        m_profileEndPatient = patient;
+      m_selectingProfileLine = false;
+      m_profileLineHasStart = false;
+      computeDoseProfile();
+      updateImage(view);
+    }
+    event->accept();
+    return;
+  }
+  if ((m_dragProfileStart || m_dragProfileEnd) &&
+      event->button() == Qt::LeftButton) {
+    int view = viewIndexFromGlobalPos(event->globalPosition().toPoint());
+    if (view == m_profileLineView) {
+      QPoint wpos = m_imageWidgets[view]->mapFromGlobal(
+          event->globalPosition().toPoint());
+      QVector3D patient = patientCoordinateAt(view, wpos);
+      if (!std::isnan(patient.x())) {
+        QPointF plane = planeCoordinateFromPatient(view, patient);
+        if (m_dragProfileStart) {
+          m_profileStartPatient = patient;
+          if (m_profileLine.points.size() >= 2)
+            m_profileLine.points[0] = plane;
+        } else if (m_dragProfileEnd) {
+          m_profileEndPatient = patient;
+          if (m_profileLine.points.size() >= 2)
+            m_profileLine.points[1] = plane;
+        }
+      }
+      computeDoseProfile();
+      updateImage(view);
+    }
+    m_dragProfileStart = m_dragProfileEnd = false;
+    event->accept();
+    return;
+  }
+  if (m_windowLevelDragActive && event->button() == Qt::LeftButton) {
+    setCursor(Qt::OpenHandCursor);
+  } else if (m_panDragActive && event->button() == Qt::LeftButton) {
+    m_panDragActive = false;
+    setCursor(Qt::OpenHandCursor);
+    event->accept();
+    return;
+  } else if (m_zoomDragActive && event->button() == Qt::LeftButton) {
+    m_zoomDragActive = false;
+    setCursor(Qt::OpenHandCursor);
+    event->accept();
+    return;
+  } else if (m_rotationDragActive && event->button() == Qt::LeftButton) {
+    m_rotationDragActive = false;
+    setCursor(m_panMode || m_zoomMode ? Qt::OpenHandCursor : Qt::ArrowCursor);
+    event->accept();
+    return;
+  }
+
+  QWidget::mouseReleaseEvent(event);
+}
+
+void DicomViewer::keyPressEvent(QKeyEvent *event) {
+  if (m_structureList && m_structureList->hasFocus()) {
+    QWidget::keyPressEvent(event);
+    return;
+  }
+  if (event->key() == Qt::Key_Escape && m_windowLevelDragActive) {
+    stopWindowLevelDrag();
+    event->accept();
+  } else if (event->key() == Qt::Key_Right || event->key() == Qt::Key_Down) {
+    showNextImage();
+    event->accept();
+  } else if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Up) {
+    showPreviousImage();
+    event->accept();
+  } else {
+    QWidget::keyPressEvent(event);
+  }
+}
+
+void DicomViewer::enterEvent(QEnterEvent *event) {
+  if (m_windowLevelDragActive || m_panMode || m_zoomMode) {
+    setCursor(Qt::OpenHandCursor);
+  }
+  QWidget::enterEvent(event);
+}
+
+void DicomViewer::leaveEvent(QEvent *event) {
+  if (m_windowLevelDragActive || m_panMode || m_zoomMode) {
+    setCursor(Qt::ArrowCursor);
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_coordLabels[i])
+      m_coordLabels[i]->hide();
+    if (m_cursorDoseLabels[i])
+      m_cursorDoseLabels[i]->hide();
+    m_imageWidgets[i]->clearCursorCross();
+  }
+  QWidget::leaveEvent(event);
+}
+
+void DicomViewer::updateImage() {
+  int count = 1;
+  if (m_viewMode == ViewMode::Dual)
+    count = 2;
+  else if (m_viewMode == ViewMode::Quad)
+    count = 4;
+  else if (m_viewMode == ViewMode::Five)
+    count = VIEW_COUNT;
+  for (int i = 0; i < count; ++i) {
+    if (m_isDVHView[i] || m_isProfileView[i])
+      continue;
+    if (m_is3DView[i]) {
+      update3DView(i);
+    } else {
+      updateImage(i);
+      m_imageWidgets[i]->setZoom(m_zoomFactor);
+      m_imageWidgets[i]->setPan(m_panOffsets[i]);
+    }
+  }
+  // Update Dose Shift overlay visibility after image updates
+  updateDoseShiftLabels();
+}
+
+void DicomViewer::updateImage(int viewIndex, bool updateStructure) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT || m_isDVHView[viewIndex] ||
+      m_is3DView[viewIndex] || m_isProfileView[viewIndex])
+    return;
+  if (m_fusionViewActive && viewIndex == 1) {
+    if (m_fusionViewImage.isNull()) {
+      m_imageWidgets[viewIndex]->setImage(QImage());
+    } else {
+      m_imageWidgets[viewIndex]->setImage(m_fusionViewImage);
+    }
+    m_imageWidgets[viewIndex]->setStructureLines(StructureLineList());
+    m_imageWidgets[viewIndex]->setStructurePoints(StructurePointList());
+    m_imageWidgets[viewIndex]->setSlicePositionLines(StructureLineList());
+    m_imageWidgets[viewIndex]->setPixelSpacing(
+        static_cast<float>(m_fusionSpacingX),
+        static_cast<float>(m_fusionSpacingY));
+    m_imageWidgets[viewIndex]->setZoom(m_zoomFactor);
+    m_imageWidgets[viewIndex]->setPan(m_panOffsets[viewIndex]);
+    return;
+  }
+
+  QImage img = m_originalImages[viewIndex];
+  if (img.isNull())
+    return;
+
+  QImage displayImg = img.convertToFormat(QImage::Format_ARGB32);
+
+  StructureLineList doseLines;
+  if (m_doseLoaded && isVolumeLoaded() && m_doseVisible) {
+    qDebug()
+        << QString("=== Updating dose overlay for view %1 ===").arg(viewIndex);
+
+    DicomVolume::Orientation ori = m_viewOrientations[viewIndex];
+    int ctIndex = m_currentIndices[viewIndex];
+
+    QString oriStr = (ori == DicomVolume::Orientation::Axial)      ? "Axial"
+                     : (ori == DicomVolume::Orientation::Sagittal) ? "Sagittal"
+                                                                   : "Coronal";
+    qDebug() << QString("Orientation: %1, CT slice index: %2")
+                    .arg(oriStr)
+                    .arg(ctIndex);
+
+    if (m_doseDisplayMode ==
+        DoseResampledVolume::DoseDisplayMode::IsodoseLines) {
+      auto isoLines = m_resampledDose.getIsodoseLines(
+          ctIndex, ori, m_doseMinRange, m_doseMaxRange, m_doseReference);
+      for (const auto &line : isoLines) {
+        StructureLine converted;
+        converted.points = line.points;
+        converted.color = line.color;
+        doseLines.append(converted);
+      }
+      qDebug() << QString("Isodose line paths: %1")
+                      .arg(doseLines.size());
+    } else {
+      // 線量オーバーレイを取得
+      QImage overlay = m_resampledDose.getSlice(
+          ctIndex, ori, m_doseMinRange, m_doseMaxRange, m_doseDisplayMode,
+          m_doseReference);
+
+      if (!overlay.isNull()) {
+        QPainter painter(&displayImg);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+
+        // オーバーレイ画像のサイズ調整
+        if (overlay.size() != displayImg.size()) {
+          qDebug() << QString("Scaling colorful overlay from %1x%2 to %3x%4")
+                          .arg(overlay.width())
+                          .arg(overlay.height())
+                          .arg(displayImg.width())
+                          .arg(displayImg.height());
+          overlay = overlay.scaled(displayImg.size(), Qt::IgnoreAspectRatio,
+                                   Qt::SmoothTransformation);
+        }
+
+        // 美しい線量オーバーレイを描画
+        painter.setOpacity(m_doseOpacity);
+        painter.drawImage(0, 0, overlay);
+        painter.setOpacity(1.0);
+
+        // デバッグ: カラフルピクセル数をカウント
+        int colorfulPixels = 0;
+        for (int y = 0; y < overlay.height(); ++y) {
+          for (int x = 0; x < overlay.width(); ++x) {
+            QRgb pixel = overlay.pixel(x, y);
+            if (qAlpha(pixel) > 10) {
+              colorfulPixels++;
+            }
+          }
+        }
+        qDebug() << QString("Colorful dose pixels: %1 out of %2 total (%3%)")
+                        .arg(colorfulPixels)
+                        .arg(overlay.width() * overlay.height())
+                        .arg(100.0 * colorfulPixels /
+                                 (overlay.width() * overlay.height()),
+                             0, 'f', 1);
+
+        painter.end();
+
+      } else {
+        qDebug() << "Warning: colorful dose overlay is null";
+      }
+    }
+  }
+
+#ifdef USE_ONNXRUNTIME
+  if (m_segmentationReady && m_segmentationVisible) {
+    DicomVolume::Orientation ori = m_viewOrientations[viewIndex];
+    int ctIndex = m_currentIndices[viewIndex];
+    cv::Mat segSlice;
+    switch (ori) {
+    case DicomVolume::Orientation::Axial:
+      segSlice = getSliceAxial(m_segmentationVolume, ctIndex);
+      break;
+    case DicomVolume::Orientation::Sagittal:
+      segSlice = getSliceSagittal(m_segmentationVolume, ctIndex);
+      break;
+    case DicomVolume::Orientation::Coronal:
+      segSlice = getSliceCoronal(m_segmentationVolume, ctIndex);
+      break;
+    }
+    if (!segSlice.empty()) {
+      QImage segOverlay = colorizeSegmentationSlice(segSlice);
+      QPainter painter(&displayImg);
+      painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+      if (segOverlay.size() != displayImg.size()) {
+        // アスペクト比を保持して臓器の位置・サイズが正しく表示されるようにする
+        // IgnoreAspectRatioを使用して表示画像と完全に一致させる
+        segOverlay = segOverlay.scaled(displayImg.size(), Qt::IgnoreAspectRatio,
+                                       Qt::SmoothTransformation);
+      }
+      painter.drawImage(0, 0, segOverlay);
+      painter.end();
+    }
+  }
+#endif
+
+  if (updateStructure) {
+    StructureLineList sLines;
+    StructurePointList sPoints;
+    int ctIndex = m_currentIndices[viewIndex];
+    if (m_rtstructLoaded && isVolumeLoaded()) {
+      int overlayStride = 1;
+      switch (m_viewOrientations[viewIndex]) {
+      case DicomVolume::Orientation::Axial:
+        sLines = m_rtstruct.axialContours(m_volume, ctIndex);
+        break;
+      case DicomVolume::Orientation::Sagittal:
+        sLines = m_rtstruct.sagittalContours(m_volume, ctIndex, overlayStride);
+        if (m_showStructurePoints)
+          sPoints =
+              m_rtstruct.sagittalVertices(m_volume, ctIndex, overlayStride);
+        break;
+      case DicomVolume::Orientation::Coronal:
+        sLines = m_rtstruct.coronalContours(m_volume, ctIndex, overlayStride);
+        if (m_showStructurePoints)
+          sPoints =
+              m_rtstruct.coronalVertices(m_volume, ctIndex, overlayStride);
+        break;
+      }
+    }
+    if (m_brachyLoaded && isVolumeLoaded()) {
+      switch (m_viewOrientations[viewIndex]) {
+      case DicomVolume::Orientation::Axial: {
+        // Use voxel center (+0.5) to match dose calculation coordinate system
+        double target = m_volume
+                            .voxelToPatient(m_volume.width() / 2.0,
+                                            m_volume.height() / 2.0, ctIndex + 0.5)
+                            .z();
+        double tol = m_volume.spacingZ() / 2.0;
+        for (const auto &d : m_brachyPlan.sources()) {
+          if (std::abs(d.position().z() - target) <= tol) {
+            QColor c =
+                (d.dwellTime() > 0.0) ? QColor(Qt::red) : QColor(Qt::yellow);
+            sPoints.append(
+                {planeCoordinateFromPatient(viewIndex, d.position()), c});
+          }
+        }
+        break;
+      }
+      case DicomVolume::Orientation::Sagittal: {
+        // Use voxel center (+0.5) to match dose calculation coordinate system
+        double target = m_volume.voxelToPatient(ctIndex + 0.5, 0.0, 0.0).x();
+        double tol = m_volume.spacingX() / 2.0;
+        for (const auto &d : m_brachyPlan.sources()) {
+          if (std::abs(d.position().x() - target) <= tol) {
+            QColor c =
+                (d.dwellTime() > 0.0) ? QColor(Qt::red) : QColor(Qt::yellow);
+            sPoints.append(
+                {planeCoordinateFromPatient(viewIndex, d.position()), c});
+          }
+        }
+        break;
+      }
+      case DicomVolume::Orientation::Coronal: {
+        // Use voxel center (+0.5) to match dose calculation coordinate system
+        double target = m_volume.voxelToPatient(0.0, ctIndex + 0.5, 0.0).y();
+        double tol = m_volume.spacingY() / 2.0;
+        for (const auto &d : m_brachyPlan.sources()) {
+          if (std::abs(d.position().y() - target) <= tol) {
+            QColor c =
+                (d.dwellTime() > 0.0) ? QColor(Qt::red) : QColor(Qt::yellow);
+            sPoints.append(
+                {planeCoordinateFromPatient(viewIndex, d.position()), c});
+          }
+        }
+        break;
+      }
+      }
+    }
+    if (m_profileLineVisible && viewIndex == m_profileLineView &&
+        m_profileLine.points.size() >= 2) {
+      sPoints.append({m_profileLine.points[0], m_profileLine.color});
+      sPoints.append({m_profileLine.points[1], m_profileLine.color});
+  }
+  m_imageWidgets[viewIndex]->setStructureLines(sLines);
+  m_imageWidgets[viewIndex]->setStructurePoints(sPoints);
+
+  // Extract and display reference points on current slice
+  StructurePointList refPoints;
+  if (m_brachyLoaded && m_brachyShowRefPointsCheck && m_brachyShowRefPointsCheck->isChecked()) {
+    const auto& brachyRefPoints = m_brachyPlan.referencePoints();
+    if (isVolumeLoaded() && !brachyRefPoints.isEmpty()) {
+      switch (m_viewOrientations[viewIndex]) {
+      case DicomVolume::Orientation::Axial: {
+        double target = m_volume.voxelToPatient(m_volume.width() / 2.0,
+                                                m_volume.height() / 2.0, ctIndex + 0.5).z();
+        double tol = m_volume.spacingZ() / 2.0;
+        for (const auto &rp : brachyRefPoints) {
+          if (std::abs(rp.position.z() - target) <= tol) {
+            refPoints.append({planeCoordinateFromPatient(viewIndex, rp.position), QColor(0, 0, 255)});
+          }
+        }
+        break;
+      }
+      case DicomVolume::Orientation::Sagittal: {
+        double target = m_volume.voxelToPatient(ctIndex + 0.5, 0.0, 0.0).x();
+        double tol = m_volume.spacingX() / 2.0;
+        for (const auto &rp : brachyRefPoints) {
+          if (std::abs(rp.position.x() - target) <= tol) {
+            refPoints.append({planeCoordinateFromPatient(viewIndex, rp.position), QColor(0, 0, 255)});
+          }
+        }
+        break;
+      }
+      case DicomVolume::Orientation::Coronal: {
+        double target = m_volume.voxelToPatient(0.0, ctIndex + 0.5, 0.0).y();
+        double tol = m_volume.spacingY() / 2.0;
+        for (const auto &rp : brachyRefPoints) {
+          if (std::abs(rp.position.y() - target) <= tol) {
+            refPoints.append({planeCoordinateFromPatient(viewIndex, rp.position), QColor(0, 0, 255)});
+          }
+        }
+        break;
+      }
+      }
+    }
+  }
+  m_imageWidgets[viewIndex]->setReferencePoints(refPoints);
+  }
+  // Prepare slice position lines container early so guides can append
+  StructureLineList sliceLines;
+
+  // Optional mm-based grid overlay
+  if (m_showGrid && isVolumeLoaded()) {
+    auto upd = [](double &mn, double &mx, double v) {
+      mn = std::min(mn, v);
+      mx = std::max(mx, v);
+    };
+    double minX = std::numeric_limits<double>::infinity();
+    double minY = std::numeric_limits<double>::infinity();
+    double minZ = std::numeric_limits<double>::infinity();
+    double maxX = -std::numeric_limits<double>::infinity();
+    double maxY = -std::numeric_limits<double>::infinity();
+    double maxZ = -std::numeric_limits<double>::infinity();
+    int xs[2] = {0, m_volume.width() - 1};
+    int ys[2] = {0, m_volume.height() - 1};
+    int zs[2] = {0, m_volume.depth() - 1};
+    for (int ix : xs)
+      for (int iy : ys)
+        for (int iz : zs) {
+          QVector3D p = m_volume.voxelToPatient(ix + 0.5, iy + 0.5, iz + 0.5);
+          upd(minX, maxX, p.x());
+          upd(minY, maxY, p.y());
+          upd(minZ, maxZ, p.z());
+        }
+    const double grid = 50.0; // 50 mm spacing
+    QColor gridColor(128, 128, 128, 120);
+    auto addLine = [&](double x1, double y1, double z1, double x2, double y2,
+                       double z2) {
+      StructureLine l;
+      l.color = gridColor;
+      l.points.append(
+          planeCoordinateFromPatient(viewIndex, QVector3D(x1, y1, z1)));
+      l.points.append(
+          planeCoordinateFromPatient(viewIndex, QVector3D(x2, y2, z2)));
+      sliceLines.append(l);
+    };
+    switch (m_viewOrientations[viewIndex]) {
+    case DicomVolume::Orientation::Axial: {
+      double z =
+          m_volume
+              .voxelToPatient(static_cast<double>(m_volume.width()) / 2.0,
+                              static_cast<double>(m_volume.height()) / 2.0,
+                              static_cast<double>(m_currentIndices[viewIndex]))
+              .z();
+      for (double x = std::ceil(minX / grid) * grid; x <= maxX; x += grid)
+        addLine(x, minY, z, x, maxY, z);
+      for (double y = std::ceil(minY / grid) * grid; y <= maxY; y += grid)
+        addLine(minX, y, z, maxX, y, z);
+      break;
+    }
+    case DicomVolume::Orientation::Sagittal: {
+      double x =
+          m_volume
+              .voxelToPatient(static_cast<double>(m_currentIndices[viewIndex]),
+                              static_cast<double>(m_volume.height()) / 2.0,
+                              static_cast<double>(m_volume.depth()) / 2.0)
+              .x();
+      for (double y = std::ceil(minY / grid) * grid; y <= maxY; y += grid)
+        addLine(x, y, minZ, x, y, maxZ);
+      for (double z = std::ceil(minZ / grid) * grid; z <= maxZ; z += grid)
+        addLine(x, minY, z, x, maxY, z);
+      break;
+    }
+    case DicomVolume::Orientation::Coronal: {
+      double y =
+          m_volume
+              .voxelToPatient(static_cast<double>(m_volume.width()) / 2.0,
+                              static_cast<double>(m_currentIndices[viewIndex]),
+                              static_cast<double>(m_volume.depth()) / 2.0)
+              .y();
+      for (double x = std::ceil(minX / grid) * grid; x <= maxX; x += grid)
+        addLine(x, y, minZ, x, y, maxZ);
+      for (double z = std::ceil(minZ / grid) * grid; z <= maxZ; z += grid)
+        addLine(minX, y, z, maxX, y, z);
+      break;
+    }
+    }
+  }
+
+  // Add RTDose bounds guide (native/aligned) as overlay lines
+  if (m_doseLoaded && isVolumeLoaded() && m_showDoseGuide) {
+    double minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0;
+    bool has = m_doseVolume.nativeExtents(minX, maxX, minY, maxY, minZ, maxZ);
+    if (has) {
+      // Draw only if current slice intersects dose extent in the orthogonal
+      // axis
+      bool draw = false;
+      // Four corners in patient space for all orientations
+      auto addRect = [&](double zfixed, double xfixed, double yfixed,
+                         DicomVolume::Orientation ori) {
+        StructureLine rect;
+        rect.color = QColor(255, 0, 255, 180); // magenta
+        auto addPt = [&](double px, double py, double pz) {
+          QPointF q =
+              planeCoordinateFromPatient(viewIndex, QVector3D(px, py, pz));
+          rect.points.append(q);
+        };
+        if (ori == DicomVolume::Orientation::Axial) {
+          addPt(minX, minY, zfixed);
+          addPt(maxX, minY, zfixed);
+          addPt(maxX, maxY, zfixed);
+          addPt(minX, maxY, zfixed);
+          addPt(minX, minY, zfixed);
+        } else if (ori == DicomVolume::Orientation::Sagittal) {
+          addPt(xfixed, minY, minZ);
+          addPt(xfixed, maxY, minZ);
+          addPt(xfixed, maxY, maxZ);
+          addPt(xfixed, minY, maxZ);
+          addPt(xfixed, minY, minZ);
+        } else { // Coronal
+          addPt(minX, yfixed, minZ);
+          addPt(maxX, yfixed, minZ);
+          addPt(maxX, yfixed, maxZ);
+          addPt(minX, yfixed, maxZ);
+          addPt(minX, yfixed, minZ);
+        }
+        // append to existing slice position lines to render as guide
+        sliceLines.append(rect);
+      };
+
+      switch (m_viewOrientations[viewIndex]) {
+      case DicomVolume::Orientation::Axial: {
+        double zslice =
+            m_volume
+                .voxelToPatient(
+                    static_cast<double>(m_volume.width()) / 2.0,
+                    static_cast<double>(m_volume.height()) / 2.0,
+                    static_cast<double>(m_currentIndices[viewIndex]))
+                .z();
+        draw =
+            (zslice >= std::min(minZ, maxZ) && zslice <= std::max(minZ, maxZ));
+        if (draw)
+          addRect(zslice, 0, 0, DicomVolume::Orientation::Axial);
+        break;
+      }
+      case DicomVolume::Orientation::Sagittal: {
+        double xslice =
+            m_volume
+                .voxelToPatient(
+                    static_cast<double>(m_currentIndices[viewIndex]),
+                    static_cast<double>(m_volume.height()) / 2.0,
+                    static_cast<double>(m_volume.depth()) / 2.0)
+                .x();
+        draw =
+            (xslice >= std::min(minX, maxX) && xslice <= std::max(minX, maxX));
+        if (draw)
+          addRect(0, xslice, 0, DicomVolume::Orientation::Sagittal);
+        break;
+      }
+      case DicomVolume::Orientation::Coronal: {
+        double yslice =
+            m_volume
+                .voxelToPatient(
+                    static_cast<double>(m_volume.width()) / 2.0,
+                    static_cast<double>(m_currentIndices[viewIndex]),
+                    static_cast<double>(m_volume.depth()) / 2.0)
+                .y();
+        draw =
+            (yslice >= std::min(minY, maxY) && yslice <= std::max(minY, maxY));
+        if (draw)
+          addRect(0, 0, yslice, DicomVolume::Orientation::Coronal);
+        break;
+      }
+      }
+    }
+  }
+  if (m_showSlicePosition && isVolumeLoaded()) {
+    QVector<int> axIndices, sagIndices, corIndices;
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      if (!m_viewContainers[i]->isVisible() || m_isDVHView[i] ||
+          m_is3DView[i] || m_isProfileView[i])
+        continue;
+      switch (m_viewOrientations[i]) {
+      case DicomVolume::Orientation::Axial:
+        axIndices.append(m_currentIndices[i]);
+        break;
+      case DicomVolume::Orientation::Sagittal:
+        sagIndices.append(m_currentIndices[i]);
+        break;
+      case DicomVolume::Orientation::Coronal:
+        corIndices.append(m_currentIndices[i]);
+        break;
+      }
+    }
+
+    double sx = m_volume.spacingX();
+    double sy = m_volume.spacingY();
+    double sz = m_volume.spacingZ();
+    QColor lineColor = Qt::gray;
+
+    switch (m_viewOrientations[viewIndex]) {
+    case DicomVolume::Orientation::Axial: {
+      double w = m_volume.width() * sx;
+      double h = m_volume.height() * sy;
+      for (int idx : sagIndices) {
+        double x = idx * sx - w / 2.0;
+        sliceLines.append(
+            {{QPointF(x, h / 2.0), QPointF(x, -h / 2.0)}, lineColor});
+      }
+      for (int idx : corIndices) {
+        double y = h / 2.0 - idx * sy;
+        sliceLines.append(
+            {{QPointF(-w / 2.0, y), QPointF(w / 2.0, y)}, lineColor});
+      }
+      break;
+    }
+    case DicomVolume::Orientation::Sagittal: {
+      double w = m_volume.height() * sy;
+      double h = m_volume.depth() * sz;
+      for (int idx : corIndices) {
+        double x = idx * sy - w / 2.0;
+        sliceLines.append(
+            {{QPointF(x, -h / 2.0), QPointF(x, h / 2.0)}, lineColor});
+      }
+      for (int idx : axIndices) {
+        // Axialスライス位置の表示が頭尾方向で反転していたため、
+        // インデックスをそのまま使用して座標を算出する。
+        double y = idx * sz - h / 2.0;
+        sliceLines.append(
+            {{QPointF(-w / 2.0, y), QPointF(w / 2.0, y)}, lineColor});
+      }
+      break;
+    }
+    case DicomVolume::Orientation::Coronal: {
+      double w = m_volume.width() * sx;
+      double h = m_volume.depth() * sz;
+      for (int idx : sagIndices) {
+        double x = idx * sx - w / 2.0;
+        sliceLines.append(
+            {{QPointF(x, -h / 2.0), QPointF(x, h / 2.0)}, lineColor});
+      }
+      for (int idx : axIndices) {
+        // Axialスライス位置の表示が頭尾方向で反転していたため修正
+        double y = idx * sz - h / 2.0;
+        sliceLines.append(
+            {{QPointF(-w / 2.0, y), QPointF(w / 2.0, y)}, lineColor});
+      }
+      break;
+    }
+    }
+  }
+  if (m_profileLineVisible && viewIndex == m_profileLineView) {
+    sliceLines.append(m_profileLine);
+  }
+  m_imageWidgets[viewIndex]->setSlicePositionLines(sliceLines);
+
+  m_imageWidgets[viewIndex]->setDoseLines(doseLines);
+
+  m_imageWidgets[viewIndex]->setImage(displayImg);
+
+  float sx = 1.0f, sy = 1.0f;
+  if (isVolumeLoaded()) {
+    switch (m_viewOrientations[viewIndex]) {
+    case DicomVolume::Orientation::Axial:
+      sx = static_cast<float>(m_volume.spacingX());
+      sy = static_cast<float>(m_volume.spacingY());
+      break;
+    case DicomVolume::Orientation::Sagittal:
+      sx = static_cast<float>(m_volume.spacingY());
+      sy = static_cast<float>(m_volume.spacingZ());
+      break;
+    case DicomVolume::Orientation::Coronal:
+      sx = static_cast<float>(m_volume.spacingX());
+      sy = static_cast<float>(m_volume.spacingZ());
+      break;
+    }
+  } else {
+    double row, col;
+    m_dicomReader->getPixelSpacing(row, col);
+    sx = static_cast<float>(col);
+    sy = static_cast<float>(row);
+  }
+  m_imageWidgets[viewIndex]->setPixelSpacing(sx, sy);
+  m_imageWidgets[viewIndex]->setZoom(m_zoomFactor);
+  m_imageWidgets[viewIndex]->setPan(m_panOffsets[viewIndex]);
+}
+
+void DicomViewer::regenerateStructureSurfaceCache() {
+  m_cachedStructureSurfaces.clear();
+
+  if (!(m_rtstructLoaded && isVolumeLoaded())) {
+    m_structureSurfacesDirty = false;
+    return;
+  }
+
+  int roiCount = m_rtstruct.roiCount();
+  m_cachedStructureSurfaces.resize(roiCount);
+
+  m_structureSurfacesDirty = false;
+}
+
+void DicomViewer::invalidateStructureSurfaceCache() {
+  m_structureSurfacesDirty = true;
+  m_cachedStructureSurfaces.clear();
+}
+
+void DicomViewer::update3DView(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT || !m_3dWidgets[viewIndex])
+    return;
+  if (!isVolumeLoaded())
+    return;
+
+  m_3dWidgets[viewIndex]->setSlices(
+      m_orientationImages[0], m_orientationIndices[0], m_orientationImages[1],
+      m_orientationIndices[1], m_orientationImages[2], m_orientationIndices[2],
+      m_volume.width(), m_volume.height(), m_volume.depth(),
+      m_volume.spacingX(), m_volume.spacingY(), m_volume.spacingZ());
+
+  StructureLine3DList lines3D;
+  if (m_rtstructLoaded && isVolumeLoaded()) {
+    lines3D = m_rtstruct.allContours3D(m_volume);
+  }
+  m_3dWidgets[viewIndex]->setStructureLines(lines3D);
+
+  if (m_structureSurfacesDirty) {
+    regenerateStructureSurfaceCache();
+  }
+
+  QVector<StructureSurface> structureSurfaces;
+  if (m_rtstructLoaded && isVolumeLoaded()) {
+    int roiCount = m_rtstruct.roiCount();
+    int cachedCount = m_cachedStructureSurfaces.size();
+    for (int r = 0; r < roiCount && r < cachedCount; ++r) {
+      if (!m_rtstruct.isROIVisible(r)) {
+        continue;
+      }
+
+      auto &surface = m_cachedStructureSurfaces[r];
+      if (surface.isEmpty()) {
+        QVector<QVector<QVector3D>> contours = m_rtstruct.roiContoursPatient(r);
+        if (!contours.isEmpty()) {
+          QColor roiColor = QColor::fromHsv((r * 40) % 360, 255, 255, 255);
+          surface.setColor(roiColor);
+          surface.setOpacity(0.3f);
+          surface.generateFromContours(contours, m_volume);
+          surface.transformTo3DWidgetSpace(m_volume);
+        }
+      }
+
+      if (!surface.isEmpty()) {
+        structureSurfaces.append(surface);
+      }
+    }
+  }
+  m_3dWidgets[viewIndex]->setStructureSurfaces(structureSurfaces);
+
+  // Build separate lists for time>0 and ==0 to enforce coloring.
+  // Map patient coordinates to 3D widget's centered-mm space
+  QVector<QVector3D> activePts;
+  QVector<QVector3D> inactivePts;
+  QVector<QPair<QVector3D, QVector3D>> activeSegs;
+  QVector<QPair<QVector3D, QVector3D>> inactiveSegs;
+  auto to3Dmm = [&](const QVector3D &patient) {
+    QVector3D vox = m_volume.patientToVoxelContinuous(patient);
+    double px_mm = m_volume.width() * m_volume.spacingX();
+    double py_mm = m_volume.height() * m_volume.spacingY();
+    double pz_mm = m_volume.depth() * m_volume.spacingZ();
+    double x_mm = vox.x() * m_volume.spacingX() - px_mm / 2.0;
+    double y_mm = vox.y() * m_volume.spacingY() - py_mm / 2.0;
+    double z_mm = 0.0;
+    if (m_volume.depth() > 1) {
+      z_mm = ((vox.z() / (m_volume.depth() - 1.0)) - 0.5) * pz_mm;
+    }
+    return QVector3D(x_mm, y_mm, z_mm);
+  };
+  if (m_brachyLoaded && isVolumeLoaded()) {
+    // Build per-channel ordered index list
+    const auto &srcs = m_brachyPlan.sources();
+    const float halfLen = 1.25f; // mm (half of 2.5mm)
+    for (const auto &s : srcs) {
+      QVector3D p = s.position();
+      QVector3D dir = s.direction();
+      if (dir.lengthSquared() > 0.0f) {
+        QVector3D a = p - dir * halfLen;
+        QVector3D b = p + dir * halfLen;
+        QVector3D a3 = to3Dmm(a);
+        QVector3D b3 = to3Dmm(b);
+        if (s.dwellTime() > 0.0)
+          activeSegs.append(qMakePair(a3, b3));
+        else
+          inactiveSegs.append(qMakePair(a3, b3));
+      }
+      QVector3D p3 = to3Dmm(p);
+      if (s.dwellTime() > 0.0)
+        activePts.append(p3);
+      else
+        inactivePts.append(p3);
+    }
+  }
+  m_3dWidgets[viewIndex]->setActiveSourcePoints(activePts);
+  m_3dWidgets[viewIndex]->setInactiveSourcePoints(inactivePts);
+  m_3dWidgets[viewIndex]->setActiveSourceSegments(activeSegs);
+  m_3dWidgets[viewIndex]->setInactiveSourceSegments(inactiveSegs);
+  m_3dWidgets[viewIndex]->setStructureLineWidth(m_structureLineWidth);
+  m_3dWidgets[viewIndex]->setZoom(m_zoomFactor * ZOOM_3D_RATIO);
+  m_3dWidgets[viewIndex]->setPan(m_panOffsets[viewIndex]);
+}
+
+void DicomViewer::updateImageInfo() {
+  QString name = "-";
+  QString id = "-";
+  QString modality = "-";
+  QString studyDate = "-";
+  QString size = "-";
+  QString size3d = "-";
+  QString studyDesc = "-";
+  QString sliceThk = "-";
+  QString pixelSpacing = "- x -";
+  QString ctExtents = "-";
+
+  if (isVolumeLoaded()) {
+    name =
+        m_privacyMode ? QStringLiteral("-") : m_dicomReader->getPatientName();
+    id = m_privacyMode ? QStringLiteral("-") : m_dicomReader->getPatientID();
+    double row, col;
+    m_dicomReader->getPixelSpacing(row, col);
+    pixelSpacing = QString("%1 x %2").arg(row).arg(col);
+    modality = m_dicomReader->getModality();
+    studyDate = m_dicomReader->getStudyDate();
+    size = QString("%1 x %2")
+               .arg(m_dicomReader->getWidth())
+               .arg(m_dicomReader->getHeight());
+    size3d = QString("%1 x %2 x %3")
+                 .arg(m_volume.width())
+                 .arg(m_volume.height())
+                 .arg(m_volume.depth());
+    studyDesc = m_dicomReader->getStudyDescription();
+    sliceThk = QString::number(m_dicomReader->getSliceThickness());
+
+    // CT Extents in patient space (mm)
+    if (m_volume.width() > 0 && m_volume.height() > 0 && m_volume.depth() > 0) {
+      auto upd = [](double &mn, double &mx, double v) {
+        mn = std::min(mn, v);
+        mx = std::max(mx, v);
+      };
+      double minX = std::numeric_limits<double>::infinity();
+      double minY = std::numeric_limits<double>::infinity();
+      double minZ = std::numeric_limits<double>::infinity();
+      double maxX = -std::numeric_limits<double>::infinity();
+      double maxY = -std::numeric_limits<double>::infinity();
+      double maxZ = -std::numeric_limits<double>::infinity();
+      int xs[2] = {0, m_volume.width() - 1};
+      int ys[2] = {0, m_volume.height() - 1};
+      int zs[2] = {0, m_volume.depth() - 1};
+      for (int ix : xs)
+        for (int iy : ys)
+          for (int iz : zs) {
+            QVector3D p = m_volume.voxelToPatient(ix + 0.5, iy + 0.5, iz + 0.5);
+            upd(minX, maxX, p.x());
+            upd(minY, maxY, p.y());
+            upd(minZ, maxZ, p.z());
+          }
+      ctExtents = QString("X:[%1,%2] Y:[%3,%4] Z:[%5,%6]")
+                      .arg(minX, 0, 'f', 2)
+                      .arg(maxX, 0, 'f', 2)
+                      .arg(minY, 0, 'f', 2)
+                      .arg(maxY, 0, 'f', 2)
+                      .arg(minZ, 0, 'f', 2)
+                      .arg(maxZ, 0, 'f', 2);
+    }
+  }
+
+  QString ctFile = m_ctFilename.isEmpty() ? QStringLiteral("-") : m_ctFilename;
+  QString text = QString("Patient: %1 (%2)\n"
+                         "Modality: %3\n"
+                         "Study Date: %4\n"
+                         "Size: %5\n"
+                         "Size (vox 3D): %6\n"
+                         "Study Desc: %6\n"
+                         "Slice Thk: %7\n"
+                         "Pixel Spacing: %8\n"
+                         "CT Extents (mm): %9\n"
+                         "CT File: %10")
+                     .arg(name)
+                     .arg(id)
+                     .arg(modality)
+                     .arg(studyDate)
+                     .arg(size)
+                     .arg(size3d)
+                     .arg(studyDesc)
+                     .arg(sliceThk)
+                     .arg(pixelSpacing)
+                     .arg(ctExtents)
+                     .arg(ctFile);
+
+  if (m_doseLoaded) {
+    QString doseSize = QString("%1 x %2 x %3")
+                           .arg(m_doseVolume.width())
+                           .arg(m_doseVolume.height())
+                           .arg(m_doseVolume.depth());
+    QString doseSpacing = QString("%1 x %2 x %3")
+                              .arg(m_doseVolume.spacingX())
+                              .arg(m_doseVolume.spacingY())
+                              .arg(m_doseVolume.spacingZ());
+    // Show both native origin (IPP) and aligned origin (after patientShift)
+    QString doseOrigin = QString("(%1, %2, %3)")
+                             .arg(m_doseVolume.originX())
+                             .arg(m_doseVolume.originY())
+                             .arg(m_doseVolume.originZ());
+    QVector3D alignedOriginV(
+        m_doseVolume.originX() + m_doseVolume.patientShift().x(),
+        m_doseVolume.originY() + m_doseVolume.patientShift().y(),
+        m_doseVolume.originZ() + m_doseVolume.patientShift().z());
+    QString doseOriginAligned = QString("(%1, %2, %3)")
+                                    .arg(alignedOriginV.x())
+                                    .arg(alignedOriginV.y())
+                                    .arg(alignedOriginV.z());
+    QString doseFile =
+        m_rtDoseFilename.isEmpty() ? QStringLiteral("-") : m_rtDoseFilename;
+
+    // RTDose extents in patient space (mm) - use native (no patientShift)
+    QString doseExtents = "-";
+    if (m_doseVolume.width() > 0 && m_doseVolume.height() > 0 &&
+        m_doseVolume.depth() > 0) {
+      auto upd = [](double &mn, double &mx, double v) {
+        mn = std::min(mn, v);
+        mx = std::max(mx, v);
+      };
+      double minX = std::numeric_limits<double>::infinity();
+      double minY = std::numeric_limits<double>::infinity();
+      double minZ = std::numeric_limits<double>::infinity();
+      double maxX = -std::numeric_limits<double>::infinity();
+      double maxY = -std::numeric_limits<double>::infinity();
+      double maxZ = -std::numeric_limits<double>::infinity();
+      int xs[2] = {0, m_doseVolume.width() - 1};
+      int ys[2] = {0, m_doseVolume.height() - 1};
+      int zs[2] = {0, m_doseVolume.depth() - 1};
+      for (int ix : xs)
+        for (int iy : ys)
+          for (int iz : zs) {
+            // Origin is now at voxel center, so use integer indices directly
+            QVector3D p =
+                m_doseVolume.voxelToPatientNative(ix, iy, iz);
+            upd(minX, maxX, p.x());
+            upd(minY, maxY, p.y());
+            upd(minZ, maxZ, p.z());
+          }
+      doseExtents = QString("X:[%1,%2] Y:[%3,%4] Z:[%5,%6]")
+                        .arg(minX, 0, 'f', 2)
+                        .arg(maxX, 0, 'f', 2)
+                        .arg(minY, 0, 'f', 2)
+                        .arg(maxY, 0, 'f', 2)
+                        .arg(minZ, 0, 'f', 2)
+                        .arg(maxZ, 0, 'f', 2);
+    }
+    text += QString("\n\nRT Dose File: %1\n"
+                    " Size: %2\n"
+                    " Spacing: %3\n"
+                    " Max Dose: %4\n"
+                    " Origin (native): %5\n"
+                    " Origin (aligned): %6\n"
+                    " Extents (mm, native): %7")
+                .arg(doseFile)
+                .arg(doseSize)
+                .arg(doseSpacing)
+                .arg(m_doseVolume.maxDose())
+                .arg(doseOrigin)
+                .arg(doseOriginAligned)
+                .arg(doseExtents);
+  } else {
+    text += "\n\nRT Dose: Not Loaded";
+  }
+
+  m_infoTextBox->setPlainText(text);
+}
+
+void DicomViewer::setZoomFactor(double factor) {
+  double maxZoom =
+      m_is3DView[m_activeViewIndex] ? (MAX_ZOOM_3D / ZOOM_3D_RATIO) : MAX_ZOOM;
+  m_zoomFactor = qBound(MIN_ZOOM, factor, maxZoom);
+
+  if (m_syncScale) {
+    syncZoomToAllViews(m_zoomFactor);
+  } else {
+    int count = 1;
+    if (m_viewMode == ViewMode::Dual)
+      count = 2;
+    else if (m_viewMode == ViewMode::Quad)
+      count = 4;
+    else if (m_viewMode == ViewMode::Five)
+      count = VIEW_COUNT;
+    for (int i = 0; i < count; ++i) {
+      if (m_is3DView[i])
+        m_3dWidgets[i]->setZoom(m_zoomFactor * ZOOM_3D_RATIO);
+      else
+        updateImage(i);
+    }
+  }
+  updateSliderPosition();
+}
+
+DicomStudyInfo DicomViewer::currentStudyInfo() const {
+  DicomStudyInfo info;
+  if (m_dicomReader) {
+    if (!m_privacyMode) {
+      info.patientID = m_dicomReader->getPatientID();
+      info.patientName = m_dicomReader->getPatientName();
+    }
+    info.modality = m_dicomReader->getModality();
+    info.studyDescription = m_dicomReader->getStudyDescription();
+    info.studyDate = m_dicomReader->getStudyDate();
+    info.frameOfReferenceUID = m_dicomReader->getFrameOfReferenceUID();
+  }
+  if (isVolumeLoaded()) {
+    const QString frameUid = m_volume.frameOfReferenceUID();
+    if (!frameUid.isEmpty())
+      info.frameOfReferenceUID = frameUid;
+  }
+  if (!m_dicomFiles.isEmpty()) {
+    const QFileInfo infoFile(m_dicomFiles.first());
+    info.seriesDirectory = infoFile.absolutePath();
+  } else if (m_activeImageSeriesIndex >= 0 &&
+             m_activeImageSeriesIndex < m_imageSeriesDirs.size()) {
+    info.seriesDirectory = m_imageSeriesDirs.at(m_activeImageSeriesIndex);
+  }
+  return info;
+}
+
+QString DicomViewer::patientInfoText() const {
+  if (m_privacyMode) {
+    return QStringLiteral("Privacy Mode");
+  }
+  return QString("ID: %1\nName: %2")
+      .arg(m_dicomReader->getPatientID())
+      .arg(m_dicomReader->getPatientName());
+}
+
+void DicomViewer::updateInfoOverlays() {
+  QString text = patientInfoText();
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_isDVHView[i] || m_is3DView[i] || m_isProfileView[i]) {
+      m_infoOverlays[i]->hide();
+      if (m_dvhWidgets[i])
+        m_dvhWidgets[i]->setPatientInfo(text);
+    } else {
+      m_infoOverlays[i]->setText(text);
+      m_infoOverlays[i]->adjustSize();
+      m_infoOverlays[i]->show();
+    }
+  }
+  updateSliderPosition();
+}
+
+QVector3D DicomViewer::patientCoordinateAt(int viewIndex,
+                                           const QPoint &pos) const {
+  if (!isVolumeLoaded())
+    return QVector3D(qQNaN(), qQNaN(), qQNaN());
+
+  const OpenGLImageWidget *widget = m_imageWidgets[viewIndex];
+  if (!widget)
+    return QVector3D(qQNaN(), qQNaN(), qQNaN());
+
+  int ww = widget->width();
+  int wh = widget->height();
+  if (ww <= 0 || wh <= 0)
+    return QVector3D(qQNaN(), qQNaN(), qQNaN());
+
+  QPointF pan = widget->pan();
+  float zoom = widget->zoom();
+
+  float spacingX = static_cast<float>(m_volume.spacingX());
+  float spacingY = static_cast<float>(m_volume.spacingY());
+  float spacingZ = static_cast<float>(m_volume.spacingZ());
+
+  float w_mm = 0.0f, h_mm = 0.0f;
+  switch (m_viewOrientations[viewIndex]) {
+  case DicomVolume::Orientation::Axial:
+    w_mm = m_volume.width() * spacingX;
+    h_mm = m_volume.height() * spacingY;
+    break;
+  case DicomVolume::Orientation::Sagittal:
+    w_mm = m_volume.height() * spacingY;
+    h_mm = m_volume.depth() * spacingZ;
+    break;
+  case DicomVolume::Orientation::Coronal:
+    w_mm = m_volume.width() * spacingX;
+    h_mm = m_volume.depth() * spacingZ;
+    break;
+  }
+  float maxDim = std::max(w_mm, h_mm);
+  if (maxDim <= 0.0f)
+    return QVector3D(qQNaN(), qQNaN(), qQNaN());
+
+  // ウィジェット座標 -> 正規化デバイス座標
+  float ndcX = 2.0f * pos.x() / ww - 1.0f;
+  float ndcY = 1.0f - 2.0f * pos.y() / wh;
+
+  // パン/ズーム補正
+  ndcX -= 2.0f * pan.x() / ww;
+  ndcY += 2.0f * pan.y() / wh;
+  ndcX /= zoom;
+  ndcY /= zoom;
+
+  // アスペクト比補正
+  float aspect = static_cast<float>(ww) / static_cast<float>(wh);
+  if (aspect > 1.0f)
+    ndcX *= aspect;
+  else
+    ndcY /= aspect;
+
+  // mm単位に戻す
+  float x_mm = ndcX * (maxDim * 0.5f);
+  float y_mm = ndcY * (maxDim * 0.5f);
+
+  if (x_mm < -w_mm / 2.0f || x_mm > w_mm / 2.0f || y_mm < -h_mm / 2.0f ||
+      y_mm > h_mm / 2.0f)
+    return QVector3D(qQNaN(), qQNaN(), qQNaN());
+
+  double vx = 0.0, vy = 0.0, vz = 0.0;
+  switch (m_viewOrientations[viewIndex]) {
+  case DicomVolume::Orientation::Axial:
+    vx = (x_mm + w_mm / 2.0f) / spacingX;
+    vy = (h_mm / 2.0f - y_mm) / spacingY;
+    vz = m_currentIndices[viewIndex];
+    break;
+  case DicomVolume::Orientation::Sagittal:
+    vx = m_currentIndices[viewIndex];
+    vy = (x_mm + w_mm / 2.0f) / spacingY;
+    // SagittalビューではY方向の動きが患者座標系のZ軸に対応するが、
+    // 元の実装では上下方向が反転していたため、ここで補正する。
+    // 上方向の移動でZ値が増加するように、符号を反転させる。
+    vz = (y_mm + h_mm / 2.0f) / spacingZ;
+    break;
+  case DicomVolume::Orientation::Coronal:
+    vx = (x_mm + w_mm / 2.0f) / spacingX;
+    vy = m_currentIndices[viewIndex];
+    // Coronalビューでも同様に上下方向のZ軸を反転させる。
+    vz = (y_mm + h_mm / 2.0f) / spacingZ;
+    break;
+  }
+
+  return m_volume.voxelToPatient(vx, vy, vz);
+}
+
+QPointF
+DicomViewer::planeCoordinateFromPatient(int viewIndex,
+                                        const QVector3D &patient) const {
+  QVector3D vox = m_volume.patientToVoxelContinuous(patient);
+  double sx = m_volume.spacingX();
+  double sy = m_volume.spacingY();
+  double sz = m_volume.spacingZ();
+  switch (m_viewOrientations[viewIndex]) {
+  case DicomVolume::Orientation::Axial: {
+    double w = m_volume.width() * sx;
+    double h = m_volume.height() * sy;
+    double x_mm = vox.x() * sx - w / 2.0;
+    double y_mm = h / 2.0 - vox.y() * sy;
+    return QPointF(x_mm, y_mm);
+  }
+  case DicomVolume::Orientation::Sagittal: {
+    double w = m_volume.height() * sy;
+    double h = m_volume.depth() * sz;
+    double x_mm = vox.y() * sy - w / 2.0;
+    double y_mm = vox.z() * sz - h / 2.0;
+    return QPointF(x_mm, y_mm);
+  }
+  case DicomVolume::Orientation::Coronal: {
+    double w = m_volume.width() * sx;
+    double h = m_volume.depth() * sz;
+    double x_mm = vox.x() * sx - w / 2.0;
+    double y_mm = vox.z() * sz - h / 2.0;
+    return QPointF(x_mm, y_mm);
+  }
+  }
+  return QPointF();
+}
+
+float DicomViewer::sampleResampledDose(const QVector3D &voxel) const {
+  auto sampled = sampleDoseValue(voxel);
+  return sampled.has_value() ? static_cast<float>(sampled.value()) : 0.0f;
+}
+
+std::optional<double> DicomViewer::sampleCtValue(const QVector3D &voxel) const {
+  const cv::Mat &vol = m_volume.data();
+  if (vol.empty())
+    return std::nullopt;
+  const int w = m_volume.width();
+  const int h = m_volume.height();
+  const int d = m_volume.depth();
+  const double x = voxel.x();
+  const double y = voxel.y();
+  const double z = voxel.z();
+  if (x < 0.0 || y < 0.0 || z < 0.0 || x >= w - 1 || y >= h - 1 ||
+      z >= d - 1)
+    return std::nullopt;
+
+  const int type = vol.type();
+  if (type != CV_16SC1 && type != CV_16UC1 && type != CV_8UC1 &&
+      type != CV_32FC1)
+    return std::nullopt;
+
+  const int x0 = static_cast<int>(std::floor(x));
+  const int y0 = static_cast<int>(std::floor(y));
+  const int z0 = static_cast<int>(std::floor(z));
+  const double xd = x - x0;
+  const double yd = y - y0;
+  const double zd = z - z0;
+
+  auto valueAt = [&](int zi, int yi, int xi) -> double {
+    switch (type) {
+    case CV_16SC1:
+      return static_cast<double>(vol.at<short>(zi, yi, xi));
+    case CV_16UC1:
+      return static_cast<double>(vol.at<unsigned short>(zi, yi, xi));
+    case CV_8UC1:
+      return static_cast<double>(vol.at<uchar>(zi, yi, xi));
+    case CV_32FC1:
+      return static_cast<double>(vol.at<float>(zi, yi, xi));
+    default:
+      return 0.0;
+    }
+  };
+
+  const double c000 = valueAt(z0, y0, x0);
+  const double c100 = valueAt(z0, y0, x0 + 1);
+  const double c010 = valueAt(z0, y0 + 1, x0);
+  const double c110 = valueAt(z0, y0 + 1, x0 + 1);
+  const double c001 = valueAt(z0 + 1, y0, x0);
+  const double c101 = valueAt(z0 + 1, y0, x0 + 1);
+  const double c011 = valueAt(z0 + 1, y0 + 1, x0);
+  const double c111 = valueAt(z0 + 1, y0 + 1, x0 + 1);
+
+  const double c00 = c000 * (1.0 - xd) + c100 * xd;
+  const double c01 = c001 * (1.0 - xd) + c101 * xd;
+  const double c10 = c010 * (1.0 - xd) + c110 * xd;
+  const double c11 = c011 * (1.0 - xd) + c111 * xd;
+  const double c0 = c00 * (1.0 - yd) + c10 * yd;
+  const double c1 = c01 * (1.0 - yd) + c11 * yd;
+  return c0 * (1.0 - zd) + c1 * zd;
+}
+
+std::optional<double> DicomViewer::sampleDoseValue(const QVector3D &voxel) const {
+  if (!m_resampledDose.isResampled())
+    return std::nullopt;
+  const int w = m_resampledDose.width();
+  const int h = m_resampledDose.height();
+  const int d = m_resampledDose.depth();
+  const double x = voxel.x();
+  const double y = voxel.y();
+  const double z = voxel.z();
+  if (x < 0.0 || y < 0.0 || z < 0.0 || x >= w - 1 || y >= h - 1 ||
+      z >= d - 1)
+    return std::nullopt;
+
+  const int x0 = static_cast<int>(std::floor(x));
+  const int y0 = static_cast<int>(std::floor(y));
+  const int z0 = static_cast<int>(std::floor(z));
+  const double xd = x - x0;
+  const double yd = y - y0;
+  const double zd = z - z0;
+  const cv::Mat &vol = m_resampledDose.data();
+
+  auto valueAt = [&](int zi, int yi, int xi) -> double {
+    return static_cast<double>(vol.at<float>(zi, yi, xi));
+  };
+
+  const double c000 = valueAt(z0, y0, x0);
+  const double c100 = valueAt(z0, y0, x0 + 1);
+  const double c010 = valueAt(z0, y0 + 1, x0);
+  const double c110 = valueAt(z0, y0 + 1, x0 + 1);
+  const double c001 = valueAt(z0 + 1, y0, x0);
+  const double c101 = valueAt(z0 + 1, y0, x0 + 1);
+  const double c011 = valueAt(z0 + 1, y0 + 1, x0);
+  const double c111 = valueAt(z0 + 1, y0 + 1, x0 + 1);
+
+  const double c00 = c000 * (1.0 - xd) + c100 * xd;
+  const double c01 = c001 * (1.0 - xd) + c101 * xd;
+  const double c10 = c010 * (1.0 - xd) + c110 * xd;
+  const double c11 = c011 * (1.0 - xd) + c111 * xd;
+  const double c0 = c00 * (1.0 - yd) + c10 * yd;
+  const double c1 = c01 * (1.0 - yd) + c11 * yd;
+  return c0 * (1.0 - zd) + c1 * zd;
+}
+
+void DicomViewer::updateCoordLabel(int viewIndex, const QPoint &pos) {
+  if (!isVolumeLoaded() || viewIndex < 0 || viewIndex >= VIEW_COUNT ||
+      m_isDVHView[viewIndex] || m_is3DView[viewIndex] ||
+      m_isProfileView[viewIndex]) {
+    if (viewIndex >= 0 && viewIndex < VIEW_COUNT) {
+      if (m_coordLabels[viewIndex])
+        m_coordLabels[viewIndex]->hide();
+      if (m_cursorDoseLabels[viewIndex])
+        m_cursorDoseLabels[viewIndex]->hide();
+      m_imageWidgets[viewIndex]->clearCursorCross();
+      // Clear stored coordinates
+      m_lastPatientCoordinates[viewIndex] = QVector3D(qQNaN(), qQNaN(), qQNaN());
+    }
+    return;
+  }
+  QVector3D patient = patientCoordinateAt(viewIndex, pos);
+  if (std::isnan(patient.x())) {
+    m_coordLabels[viewIndex]->hide();
+    if (m_cursorDoseLabels[viewIndex])
+      m_cursorDoseLabels[viewIndex]->hide();
+    m_imageWidgets[viewIndex]->clearCursorCross();
+    // Clear stored coordinates
+    m_lastPatientCoordinates[viewIndex] = QVector3D(qQNaN(), qQNaN(), qQNaN());
+    return;
+  }
+
+  // Store the current patient coordinates
+  m_lastPatientCoordinates[viewIndex] = patient;
+
+  QString text = QString("X:%1 mm Y:%2 mm Z:%3 mm")
+                     .arg(patient.x(), 0, 'f', 1)
+                     .arg(patient.y(), 0, 'f', 1)
+                     .arg(patient.z(), 0, 'f', 1);
+
+  QVector3D voxel = m_volume.patientToVoxelContinuous(patient);
+  int ix = static_cast<int>(std::round(voxel.x()));
+  int iy = static_cast<int>(std::round(voxel.y()));
+  int iz = static_cast<int>(std::round(voxel.z()));
+  const bool voxelInBounds =
+      ix >= 0 && ix < m_volume.width() && iy >= 0 && iy < m_volume.height() &&
+      iz >= 0 && iz < m_volume.depth();
+
+  bool ctShown = false;
+  int ctValue = 0;
+  if (voxelInBounds) {
+    const cv::Mat &volumeData = m_volume.data();
+    if (!volumeData.empty()) {
+      switch (volumeData.type()) {
+      case CV_16SC1:
+        ctValue = static_cast<int>(volumeData.at<short>(iz, iy, ix));
+        ctShown = true;
+        break;
+      case CV_16UC1:
+        ctValue =
+            static_cast<int>(volumeData.at<unsigned short>(iz, iy, ix));
+        ctShown = true;
+        break;
+      case CV_8UC1:
+        ctValue = static_cast<int>(volumeData.at<uchar>(iz, iy, ix));
+        ctShown = true;
+        break;
+      case CV_32FC1:
+        ctValue =
+            static_cast<int>(std::lround(volumeData.at<float>(iz, iy, ix)));
+        ctShown = true;
+        break;
+      default:
+        break;
+      }
+    }
+  }
+  if (ctShown) {
+    text += QString(" CT:%1 HU").arg(ctValue);
+  }
+
+  bool doseShown = false;
+  float doseValue = std::numeric_limits<float>::quiet_NaN();
+  if (voxelInBounds && m_doseLoaded && m_resampledDose.isResampled()) {
+    float dose = m_resampledDose.voxelDose(ix, iy, iz);
+    doseValue = dose;
+    if (m_cursorDoseLabels[viewIndex]) {
+      m_cursorDoseLabels[viewIndex]->setText(
+          QString("%1 Gy").arg(dose, 0, 'f', 2));
+      m_cursorDoseLabels[viewIndex]->adjustSize();
+      QPoint lp =
+          m_imageWidgets[viewIndex]->mapTo(m_viewContainers[viewIndex], pos);
+      int x = lp.x() + 15;
+      int y = lp.y() + 15;
+      x = std::min(x, m_viewContainers[viewIndex]->width() -
+                          m_cursorDoseLabels[viewIndex]->width());
+      y = std::min(y, m_viewContainers[viewIndex]->height() -
+                          m_cursorDoseLabels[viewIndex]->height());
+      m_cursorDoseLabels[viewIndex]->move(x, y);
+      m_cursorDoseLabels[viewIndex]->show();
+
+      // カーソル位置のクロスマーク用座標を計算（mm単位）
+      float w_mm = 0.0f, h_mm = 0.0f, cx_mm = 0.0f, cy_mm = 0.0f;
+      switch (m_viewOrientations[viewIndex]) {
+      case DicomVolume::Orientation::Axial:
+        w_mm = m_volume.width() * m_volume.spacingX();
+        h_mm = m_volume.height() * m_volume.spacingY();
+        cx_mm = voxel.x() * m_volume.spacingX() - w_mm / 2.0f;
+        cy_mm = h_mm / 2.0f - voxel.y() * m_volume.spacingY();
+        break;
+      case DicomVolume::Orientation::Sagittal:
+        w_mm = m_volume.height() * m_volume.spacingY();
+        h_mm = m_volume.depth() * m_volume.spacingZ();
+        cx_mm = voxel.y() * m_volume.spacingY() - w_mm / 2.0f;
+        // これまではZ軸方向が反転していたため、ボクセルのZ値から
+        // 上下方向の座標を算出する際に符号を反転させる。
+        cy_mm = voxel.z() * m_volume.spacingZ() - h_mm / 2.0f;
+        break;
+      case DicomVolume::Orientation::Coronal:
+        w_mm = m_volume.width() * m_volume.spacingX();
+        h_mm = m_volume.depth() * m_volume.spacingZ();
+        cx_mm = voxel.x() * m_volume.spacingX() - w_mm / 2.0f;
+        cy_mm = voxel.z() * m_volume.spacingZ() - h_mm / 2.0f;
+        break;
+      }
+      m_imageWidgets[viewIndex]->setCursorCross(QPointF(cx_mm, cy_mm));
+      doseShown = true;
+    }
+  }
+  if (!std::isnan(doseValue)) {
+    text += QString(" Dose:%1 Gy").arg(doseValue, 0, 'f', 2);
+  }
+
+  if (!doseShown) {
+    if (m_cursorDoseLabels[viewIndex])
+      m_cursorDoseLabels[viewIndex]->hide();
+    m_imageWidgets[viewIndex]->clearCursorCross();
+  }
+
+  m_coordLabels[viewIndex]->setText(text);
+  m_coordLabels[viewIndex]->adjustSize();
+  m_coordLabels[viewIndex]->show();
+  updateSliderPosition();
+}
+
+void DicomViewer::startWindowLevelDrag() {
+  m_windowLevelDragActive = true;
+  m_windowLevelButton->setChecked(true);
+  setCursor(Qt::OpenHandCursor);
+
+  // 自動終了タイマーを開始
+  m_windowLevelTimer->start(WINDOW_LEVEL_TIMEOUT);
+
+  qDebug() << "Window/Level drag mode started";
+  updateOverlayInteractionStates();
+}
+
+void DicomViewer::stopWindowLevelDrag() {
+  m_windowLevelDragActive = false;
+  m_windowLevelButton->setChecked(false);
+  setCursor(Qt::ArrowCursor);
+
+  // タイマーを停止
+  m_windowLevelTimer->stop();
+
+  qDebug() << "Window/Level drag mode stopped";
+  updateOverlayInteractionStates();
+}
+
+void DicomViewer::updateWindowLevelFromMouse(const QPoint &currentPos) {
+  if (!m_windowLevelDragActive)
+    return;
+
+  QPoint delta = currentPos - m_dragStartPos;
+
+  // 左右の動きでWindow調整
+  double windowDelta = delta.x() * WINDOW_LEVEL_SENSITIVITY;
+  double newWindow = qBound(1.0, m_dragStartWindow + windowDelta, 4096.0);
+
+  // 上下の動きでLevel調整（上向きで増加）
+  double levelDelta = -delta.y() * WINDOW_LEVEL_SENSITIVITY;
+  double newLevel = qBound(-1024.0, m_dragStartLevel + levelDelta, 3072.0);
+
+  // スライダーとスピンボックスを更新
+  m_windowSlider->setValue(static_cast<int>(newWindow));
+  m_levelSlider->setValue(static_cast<int>(newLevel));
+  m_windowSpinBox->setValue(static_cast<int>(newWindow));
+  m_levelSpinBox->setValue(static_cast<int>(newLevel));
+
+  // 画像を更新
+  setWindowLevel(newWindow, newLevel);
+
+  // シグナルを送信
+  emit windowLevelChanged(newWindow, newLevel);
+}
+
+void DicomViewer::onImageSliderChanged(int value) {
+  QSlider *senderSlider = qobject_cast<QSlider *>(sender());
+  int viewIndex = -1;
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_sliceSliders[i] == senderSlider) {
+      viewIndex = i;
+      break;
+    }
+  }
+  int count = isVolumeLoaded()
+                  ? sliceCountForOrientation(m_viewOrientations[viewIndex])
+                  : m_dicomFiles.size();
+  if (viewIndex >= 0 && value >= 0 && value < count &&
+      value != m_currentIndices[viewIndex]) {
+    m_activeViewIndex = viewIndex;
+    loadSlice(viewIndex, value);
+    updateSliceLabels();
+  }
+}
+
+void DicomViewer::resizeEvent(QResizeEvent *event) {
+  QWidget::resizeEvent(event);
+  updateSliderPosition();
+}
+
+void DicomViewer::updateSliderPosition() {
+  auto arrangeLeftButtons = [&](int viewIndex) {
+    int x = 4;
+    int maxHeight = 0;
+    if (viewIndex >= 0 && viewIndex < VIEW_COUNT) {
+      if (m_orientationButtons[viewIndex]) {
+        m_orientationButtons[viewIndex]->move(x, 4);
+        m_orientationButtons[viewIndex]->raise();
+        m_orientationButtons[viewIndex]->show();
+        maxHeight = std::max(maxHeight, m_orientationButtons[viewIndex]->height());
+        x += m_orientationButtons[viewIndex]->width() + 4;
+      }
+      if (m_imageToggleButtons[viewIndex] &&
+          m_imageToggleButtons[viewIndex]->isVisible()) {
+        m_imageToggleButtons[viewIndex]->move(x, 4);
+        m_imageToggleButtons[viewIndex]->raise();
+        maxHeight = std::max(maxHeight, m_imageToggleButtons[viewIndex]->height());
+        x += m_imageToggleButtons[viewIndex]->width() + 4;
+      }
+      if (m_exportButtons[viewIndex] &&
+          m_exportButtons[viewIndex]->isVisible()) {
+        m_exportButtons[viewIndex]->move(x, 4);
+        m_exportButtons[viewIndex]->raise();
+        maxHeight = std::max(maxHeight, m_exportButtons[viewIndex]->height());
+        x += m_exportButtons[viewIndex]->width() + 4;
+      }
+      if (m_imageSeriesButtons[viewIndex] &&
+          m_imageSeriesButtons[viewIndex]->isVisible()) {
+        m_imageSeriesButtons[viewIndex]->move(x, 4);
+        m_imageSeriesButtons[viewIndex]->raise();
+        maxHeight = std::max(maxHeight, m_imageSeriesButtons[viewIndex]->height());
+        x += m_imageSeriesButtons[viewIndex]->width() + 4;
+      }
+
+      // Second row: Line and Surface toggle buttons
+      int secondRowY = 4 + maxHeight + 4; // Below first row with 4px spacing
+      int x2 = 4;
+      if (m_lineToggleButtons[viewIndex] &&
+          m_lineToggleButtons[viewIndex]->isVisible()) {
+        m_lineToggleButtons[viewIndex]->move(x2, secondRowY);
+        m_lineToggleButtons[viewIndex]->raise();
+        x2 += m_lineToggleButtons[viewIndex]->width() + 4;
+      }
+      if (m_surfaceToggleButtons[viewIndex] &&
+          m_surfaceToggleButtons[viewIndex]->isVisible()) {
+        m_surfaceToggleButtons[viewIndex]->move(x2, secondRowY);
+        m_surfaceToggleButtons[viewIndex]->raise();
+        x2 += m_surfaceToggleButtons[viewIndex]->width() + 4;
+      }
+    }
+    return maxHeight;
+  };
+
+  auto arrangeRightButtons = [&](int viewIndex, int sliderWidth,
+                                 int colorBarWidth) {
+    int maxHeight = 0;
+    if (viewIndex >= 0 && viewIndex < VIEW_COUNT) {
+      constexpr int rightMargin = 8;
+      int x = m_viewContainers[viewIndex]->width() - sliderWidth -
+              colorBarWidth - rightMargin;
+      auto placeButton = [&](QPushButton *button) {
+        if (!button || !button->isVisible())
+          return;
+        button->adjustSize();
+        x -= button->width();
+        button->move(x, 4);
+        button->raise();
+        maxHeight = std::max(maxHeight, button->height());
+        x -= 4;
+      };
+      placeButton(m_viewZoomButtons[viewIndex]);
+      placeButton(m_viewPanButtons[viewIndex]);
+      placeButton(m_viewWindowLevelButtons[viewIndex]);
+    }
+    return maxHeight;
+  };
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (!m_sliceIndexLabels[i])
+      continue;
+    updateInteractionButtonVisibility(i);
+    if (m_isDVHView[i] || m_is3DView[i] || m_isProfileView[i]) {
+      int sliderWidth =
+          m_sliceSliders[i]->isVisible() ? m_sliceSliders[i]->width() : 0;
+      arrangeLeftButtons(i);
+      arrangeRightButtons(i, sliderWidth, 0);
+      continue;
+    }
+    int sliderWidth =
+        m_sliceSliders[i]->isVisible() ? m_sliceSliders[i]->width() : 0;
+    int colorBarWidth = 0;
+    if (m_colorBars[i] && m_colorBars[i]->isVisible()) {
+      colorBarWidth = m_colorBars[i]->width();
+      if (colorBarWidth == 0)
+        colorBarWidth = m_colorBars[i]->preferredWidth();
+    }
+    QSize sz = m_sliceIndexLabels[i]->sizeHint();
+    int x = m_viewContainers[i]->width() - sliderWidth - sz.width() - 4;
+    int y = m_viewContainers[i]->height() - sz.height() - 4;
+    m_sliceIndexLabels[i]->move(x, y);
+    m_sliceIndexLabels[i]->raise();
+
+    int leftHeight = arrangeLeftButtons(i);
+    int rightHeight = arrangeRightButtons(i, sliderWidth, colorBarWidth);
+    int topHeight = std::max(leftHeight, rightHeight);
+    if (m_infoOverlays[i]) {
+      int offsetY = 4 + topHeight;
+      m_infoOverlays[i]->move(4, offsetY);
+      m_infoOverlays[i]->raise();
+    }
+    if (m_doseShiftLabels[i]) {
+      QSize sz = m_doseShiftLabels[i]->sizeHint();
+      int x = (m_viewContainers[i]->width() - sz.width()) / 2;
+      int y = 4 + topHeight; // top-center avoiding buttons
+      m_doseShiftLabels[i]->move(x, y);
+      m_doseShiftLabels[i]->raise();
+    }
+    if (m_coordLabels[i]) {
+      int cy = m_viewContainers[i]->height() -
+               (m_sliceIndexLabels[i]->isVisible()
+                    ? m_sliceIndexLabels[i]->sizeHint().height()
+                    : 0) -
+               m_coordLabels[i]->sizeHint().height() - 8;
+      m_coordLabels[i]->move(4, cy);
+      m_coordLabels[i]->raise();
+    }
+  }
+
+  // 注意: 再リサンプルは呼び出し側で一度だけ実行する（無限更新の回避）
+}
+
+void DicomViewer::updateInteractionButtonVisibility(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  if (!m_viewContainers[viewIndex])
+    return;
+
+  bool viewVisible = m_viewContainers[viewIndex]->isVisible();
+  if (!viewVisible) {
+    if (m_viewWindowLevelButtons[viewIndex])
+      m_viewWindowLevelButtons[viewIndex]->hide();
+    if (m_viewPanButtons[viewIndex])
+      m_viewPanButtons[viewIndex]->hide();
+    if (m_viewZoomButtons[viewIndex])
+      m_viewZoomButtons[viewIndex]->hide();
+    if (m_imageToggleButtons[viewIndex])
+      m_imageToggleButtons[viewIndex]->hide();
+    if (m_lineToggleButtons[viewIndex])
+      m_lineToggleButtons[viewIndex]->hide();
+    if (m_surfaceToggleButtons[viewIndex])
+      m_surfaceToggleButtons[viewIndex]->hide();
+    if (m_exportButtons[viewIndex])
+      m_exportButtons[viewIndex]->hide();
+    return;
+  }
+
+  bool hasImageContent = isVolumeLoaded() || !m_dicomFiles.isEmpty();
+  bool show = hasImageContent && !m_isDVHView[viewIndex] &&
+              !m_isProfileView[viewIndex];
+  if (m_is3DView[viewIndex])
+    show = show && isVolumeLoaded();
+
+  if (m_viewWindowLevelButtons[viewIndex])
+    m_viewWindowLevelButtons[viewIndex]->setVisible(show);
+  if (m_viewPanButtons[viewIndex])
+    m_viewPanButtons[viewIndex]->setVisible(show);
+  if (m_viewZoomButtons[viewIndex])
+    m_viewZoomButtons[viewIndex]->setVisible(show);
+
+  // Show Image toggle button only in 3D view
+  if (m_imageToggleButtons[viewIndex]) {
+    bool showImageToggle = m_is3DView[viewIndex] && hasImageContent && isVolumeLoaded();
+    m_imageToggleButtons[viewIndex]->setVisible(showImageToggle);
+    if (showImageToggle) {
+      m_imageToggleButtons[viewIndex]->adjustSize();
+    }
+  }
+
+  // Show Line toggle button only in 3D view with RT Structure
+  if (m_lineToggleButtons[viewIndex]) {
+    bool showLineToggle = m_is3DView[viewIndex] && hasImageContent && isVolumeLoaded() && m_rtstructLoaded;
+    m_lineToggleButtons[viewIndex]->setVisible(showLineToggle);
+    if (showLineToggle) {
+      m_lineToggleButtons[viewIndex]->adjustSize();
+    }
+  }
+
+  // Show Surface toggle button only in 3D view with RT Structure
+  if (m_surfaceToggleButtons[viewIndex]) {
+    bool showSurfaceToggle = m_is3DView[viewIndex] && hasImageContent && isVolumeLoaded() && m_rtstructLoaded;
+    m_surfaceToggleButtons[viewIndex]->setVisible(showSurfaceToggle);
+    if (showSurfaceToggle) {
+      m_surfaceToggleButtons[viewIndex]->adjustSize();
+    }
+  }
+
+  // Show Export button only in 3D view
+  if (m_exportButtons[viewIndex]) {
+    bool showExport = m_is3DView[viewIndex] && hasImageContent && isVolumeLoaded();
+    m_exportButtons[viewIndex]->setVisible(showExport);
+    if (showExport) {
+      m_exportButtons[viewIndex]->adjustSize();
+    }
+  }
+}
+
+void DicomViewer::updateOverlayInteractionStates() {
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_viewWindowLevelButtons[i]) {
+      QSignalBlocker blocker(m_viewWindowLevelButtons[i]);
+      m_viewWindowLevelButtons[i]->setChecked(m_windowLevelDragActive);
+    }
+    if (m_viewPanButtons[i]) {
+      QSignalBlocker blocker(m_viewPanButtons[i]);
+      m_viewPanButtons[i]->setChecked(m_panMode);
+    }
+    if (m_viewZoomButtons[i]) {
+      QSignalBlocker blocker(m_viewZoomButtons[i]);
+      m_viewZoomButtons[i]->setChecked(m_zoomMode);
+    }
+  }
+}
+
+void DicomViewer::onViewWindowLevelToggled(int viewIndex, bool checked) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  m_activeViewIndex = viewIndex;
+  if (m_windowLevelButton->isChecked() != checked) {
+    m_windowLevelButton->setChecked(checked);
+    onWindowLevelButtonClicked();
+  } else {
+    updateOverlayInteractionStates();
+  }
+}
+
+void DicomViewer::onViewPanToggled(int viewIndex, bool checked) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  m_activeViewIndex = viewIndex;
+  if (m_panButton->isChecked() != checked) {
+    m_panButton->setChecked(checked);
+  } else {
+    onPanModeToggled(checked);
+  }
+  updateOverlayInteractionStates();
+}
+
+void DicomViewer::onViewZoomToggled(int viewIndex, bool checked) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  m_activeViewIndex = viewIndex;
+  if (m_zoomButton->isChecked() != checked) {
+    m_zoomButton->setChecked(checked);
+  } else {
+    onZoomModeToggled(checked);
+  }
+  updateOverlayInteractionStates();
+}
+
+void DicomViewer::onImageToggleClicked(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  if (!m_is3DView[viewIndex])
+    return;
+
+  // Toggle visibility
+  m_show3DImages[viewIndex] = !m_show3DImages[viewIndex];
+  m_show3DLines[viewIndex] = !m_show3DLines[viewIndex];
+  m_show3DSurfaces[viewIndex] = !m_show3DSurfaces[viewIndex];
+
+  // Update 3D widget
+  if (m_3dWidgets[viewIndex]) {
+    m_3dWidgets[viewIndex]->setShowImages(m_show3DImages[viewIndex]);
+    m_3dWidgets[viewIndex]->setShowLines(m_show3DLines[viewIndex]);
+    m_3dWidgets[viewIndex]->setShowSurfaces(m_show3DSurfaces[viewIndex]);
+  }
+}
+
+void DicomViewer::onLineToggleClicked(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  if (!m_is3DView[viewIndex])
+    return;
+
+  // Toggle Line visibility only
+  m_show3DLines[viewIndex] = !m_show3DLines[viewIndex];
+
+  // Update 3D widget
+  if (m_3dWidgets[viewIndex]) {
+    m_3dWidgets[viewIndex]->setShowLines(m_show3DLines[viewIndex]);
+  }
+}
+
+void DicomViewer::onSurfaceToggleClicked(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  if (!m_is3DView[viewIndex])
+    return;
+
+  // Toggle Surface visibility only
+  m_show3DSurfaces[viewIndex] = !m_show3DSurfaces[viewIndex];
+
+  // Update 3D widget
+  if (m_3dWidgets[viewIndex]) {
+    m_3dWidgets[viewIndex]->setShowSurfaces(m_show3DSurfaces[viewIndex]);
+  }
+}
+
+void DicomViewer::updateSliceLabels() {
+  int count = 1;
+  if (m_viewMode == ViewMode::Dual)
+    count = 2;
+  else if (m_viewMode == ViewMode::Quad)
+    count = 4;
+  else if (m_viewMode == ViewMode::Five)
+    count = VIEW_COUNT;
+  for (int i = 0; i < count; ++i) {
+    if (m_isDVHView[i] || m_is3DView[i] || m_isProfileView[i]) {
+      m_sliceIndexLabels[i]->hide();
+      continue;
+    }
+    if (m_fusionViewActive && i == 1) {
+      m_sliceIndexLabels[i]->setText(tr("Fusion"));
+      m_sliceIndexLabels[i]->adjustSize();
+      m_sliceIndexLabels[i]->show();
+      continue;
+    }
+    int total = isVolumeLoaded()
+                    ? sliceCountForOrientation(m_viewOrientations[i])
+                    : m_dicomFiles.size();
+    QString text =
+        (total == 0) ? QString("0/0")
+                     : QString("%1/%2").arg(m_currentIndices[i] + 1).arg(total);
+    m_sliceIndexLabels[i]->setText(text);
+    m_sliceIndexLabels[i]->adjustSize();
+    m_sliceIndexLabels[i]->show();
+  }
+  updateSliderPosition();
+}
+
+void DicomViewer::updateViewLayout() {
+  if (!m_imageLayout)
+    return;
+
+  while (QLayoutItem *item = m_imageLayout->takeAt(0)) {
+    // no need to delete widgets, they are owned elsewhere
+  }
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    m_viewContainers[i]->setVisible(false);
+    // ★新規追加: 方向ボタンの表示制御
+    if (m_orientationButtons[i]) {
+      m_orientationButtons[i]->setVisible(false);
+    }
+    if (m_imageSeriesButtons[i]) {
+      m_imageSeriesButtons[i]->setVisible(false);
+    }
+    if (m_viewWindowLevelButtons[i])
+      m_viewWindowLevelButtons[i]->setVisible(false);
+    if (m_viewPanButtons[i])
+      m_viewPanButtons[i]->setVisible(false);
+    if (m_viewZoomButtons[i])
+      m_viewZoomButtons[i]->setVisible(false);
+  }
+
+  switch (m_viewMode) {
+  case ViewMode::Single:
+    m_imageLayout->addWidget(m_viewContainers[0], 0, 0);
+    m_viewContainers[0]->setVisible(true);
+    if (m_orientationButtons[0]) {
+      m_orientationButtons[0]->setVisible(isVolumeLoaded());
+    }
+    break;
+  case ViewMode::Dual:
+    m_imageLayout->addWidget(m_viewContainers[0], 0, 0);
+    m_imageLayout->addWidget(m_viewContainers[1], 0, 1);
+    m_viewContainers[0]->setVisible(true);
+    m_viewContainers[1]->setVisible(true);
+    if (m_orientationButtons[0] && m_orientationButtons[1]) {
+      m_orientationButtons[0]->setVisible(isVolumeLoaded());
+      m_orientationButtons[1]->setVisible(isVolumeLoaded());
+    }
+    break;
+  case ViewMode::Quad:
+    m_imageLayout->addWidget(m_viewContainers[0], 0, 0);
+    m_imageLayout->addWidget(m_viewContainers[1], 0, 1);
+    m_imageLayout->addWidget(m_viewContainers[2], 1, 0);
+    m_imageLayout->addWidget(m_viewContainers[3], 1, 1);
+    for (int i = 0; i < 4; ++i) {
+      m_viewContainers[i]->setVisible(true);
+      if (m_orientationButtons[i]) {
+        m_orientationButtons[i]->setVisible(isVolumeLoaded());
+      }
+    }
+    break;
+  case ViewMode::Five:
+    m_imageLayout->addWidget(m_viewContainers[0], 0, 0, 1,
+                             2); // top-left spans two columns
+    m_imageLayout->addWidget(m_viewContainers[1], 0, 2); // top-right
+    m_imageLayout->addWidget(m_viewContainers[2], 1, 0); // bottom-left-left
+    m_imageLayout->addWidget(m_viewContainers[3], 1, 1); // bottom-left-right
+    m_imageLayout->addWidget(m_viewContainers[4], 1, 2); // bottom-right
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      m_viewContainers[i]->setVisible(true);
+      if (m_orientationButtons[i]) {
+        m_orientationButtons[i]->setVisible(isVolumeLoaded());
+      }
+    }
+    break;
+  }
+  m_imageLayout->setRowStretch(0, 1);
+  m_imageLayout->setRowStretch(
+      1,
+      (m_viewMode == ViewMode::Quad || m_viewMode == ViewMode::Five) ? 1 : 0);
+  if (m_viewMode == ViewMode::Five) {
+    // 行の比率: 上段と下段を完全に均等に
+    m_imageLayout->setRowStretch(0, 1); // 上段 (Axial + 3D)
+    m_imageLayout->setRowStretch(1, 1); // 下段 (Sag + Cor + DVH)
+
+    // 列の比率: 左右を6:4に設定
+    // 左側（列0+列1）：右側（列2）= 6:4
+    m_imageLayout->setColumnStretch(0, 3); // 左列 (Axialの左半分, Sagittal)
+    m_imageLayout->setColumnStretch(1, 3); // 中央列 (Axialの右半分, Coronal)
+    m_imageLayout->setColumnStretch(2, 4); // 右列 (3D, DVH)
+  } else {
+    // 他のモードの設定
+    m_imageLayout->setRowStretch(0, 1);
+    m_imageLayout->setRowStretch(
+        1,
+        (m_viewMode == ViewMode::Quad || m_viewMode == ViewMode::Five) ? 1 : 0);
+    m_imageLayout->setColumnStretch(0, 1);
+    m_imageLayout->setColumnStretch(
+        1,
+        (m_viewMode == ViewMode::Dual || m_viewMode == ViewMode::Quad) ? 1 : 0);
+    m_imageLayout->setColumnStretch(2, 0);
+  }
+
+  // ★新規追加: ボタン表示の更新
+  updateImageSeriesButtons();
+  updateOrientationButtonTexts();
+  for (int i = 0; i < VIEW_COUNT; ++i)
+    updateInteractionButtonVisibility(i);
+  updateSliderPosition();
+}
+
+void DicomViewer::setWindowLevel(double window, double level) {
+  if (m_activeImageSeriesIndex >= 0 &&
+      m_activeImageSeriesIndex < m_seriesWindowValues.size())
+    m_seriesWindowValues[m_activeImageSeriesIndex] = window;
+  if (m_activeImageSeriesIndex >= 0 &&
+      m_activeImageSeriesIndex < m_seriesLevelValues.size())
+    m_seriesLevelValues[m_activeImageSeriesIndex] = level;
+  if (m_activeImageSeriesIndex >= 0 &&
+      m_activeImageSeriesIndex < m_seriesWindowLevelInitialized.size())
+    m_seriesWindowLevelInitialized[m_activeImageSeriesIndex] = true;
+  m_dicomReader->setWindowLevel(window, level);
+  if (m_windowSlider) {
+    m_windowSlider->blockSignals(true);
+    m_levelSlider->blockSignals(true);
+    m_windowSlider->setValue(static_cast<int>(window));
+    m_levelSlider->setValue(static_cast<int>(level));
+    m_windowSpinBox->setValue(static_cast<int>(window));
+    m_levelSpinBox->setValue(static_cast<int>(level));
+    m_windowSlider->blockSignals(false);
+    m_levelSlider->blockSignals(false);
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_isDVHView[i] || m_isProfileView[i])
+      continue;
+    if (isVolumeLoaded()) {
+      int idx = m_currentIndices[i];
+      QImage img = m_volume.getSlice(idx, m_viewOrientations[i], window, level);
+      m_originalImages[i] = img;
+      int oriIndex = static_cast<int>(m_viewOrientations[i]);
+      m_orientationImages[oriIndex] = img;
+      m_orientationIndices[oriIndex] = idx;
+    } else if (m_currentIndices[i] >= 0 &&
+               m_currentIndices[i] < m_dicomFiles.size()) {
+      if (m_dicomReader->loadDicomFile(m_dicomFiles[m_currentIndices[i]])) {
+        m_dicomReader->setWindowLevel(window, level);
+        m_originalImages[i] = m_dicomReader->getImage();
+      }
+    }
+    updateImage(i, false);
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_is3DView[i]) {
+      update3DView(i);
+    }
+  }
+}
+
+int DicomViewer::viewIndexFromGlobalPos(const QPoint &globalPos) const {
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (!m_viewContainers[i]->isVisible())
+      continue;
+    if (m_viewContainers[i]->rect().contains(
+            m_viewContainers[i]->mapFromGlobal(globalPos))) {
+      return i;
+    }
+  }
+  return m_activeViewIndex;
+}
+
+void DicomViewer::loadVolumeSlice(int viewIndex, int sliceIndex) {
+  if (!isVolumeLoaded() || m_isDVHView[viewIndex] || m_is3DView[viewIndex] ||
+      m_isProfileView[viewIndex])
+    return;
+  int count = sliceCountForOrientation(m_viewOrientations[viewIndex]);
+  if (sliceIndex < 0 || sliceIndex >= count)
+    return;
+  QImage img =
+      m_volume.getSlice(sliceIndex, m_viewOrientations[viewIndex],
+                        m_windowSlider->value(), m_levelSlider->value());
+  m_originalImages[viewIndex] = img;
+  int oriIndex = static_cast<int>(m_viewOrientations[viewIndex]);
+  m_orientationImages[oriIndex] = img;
+  m_orientationIndices[oriIndex] = sliceIndex;
+  m_currentIndices[viewIndex] = sliceIndex;
+  if (m_showSlicePosition)
+    updateImage();
+  else
+    updateImage(viewIndex);
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_is3DView[i]) {
+      update3DView(i);
+    }
+  }
+
+  // スライス変更時にカーソル情報をリセット
+  if (viewIndex >= 0 && viewIndex < VIEW_COUNT) {
+    if (m_cursorDoseLabels[viewIndex])
+      m_cursorDoseLabels[viewIndex]->hide();
+    m_imageWidgets[viewIndex]->clearCursorCross();
+  }
+}
+
+int DicomViewer::sliceCountForOrientation(DicomVolume::Orientation ori) const {
+  switch (ori) {
+  case DicomVolume::Orientation::Axial:
+    return m_volume.depth();
+  case DicomVolume::Orientation::Sagittal:
+    return m_volume.width();
+  case DicomVolume::Orientation::Coronal:
+    return m_volume.height();
+  }
+  return 0;
+}
+
+void DicomViewer::updateDoseAlignment() {
+  // Validate geometry presence
+  if (!isVolumeLoaded() || m_doseVolume.width() == 0 ||
+      m_doseVolume.height() == 0 || m_doseVolume.depth() == 0) {
+    m_doseVolume.setPatientShift(QVector3D(0, 0, 0));
+    QMatrix4x4 id;
+    id.setToIdentity();
+    m_doseVolume.setCtToDoseTransform(id);
+    m_doseShift = QVector3D(0, 0, 0);
+    return;
+  }
+
+  // Always use identity rotation between CT patient and Dose patient
+  QMatrix4x4 id;
+  id.setToIdentity();
+  m_doseVolume.setCtToDoseTransform(id);
+
+  // Preserve RTDOSE native position on load: do not auto-shift.
+  // Many datasets already share a common patient coordinate system; adding
+  // additional origin/center alignment here can introduce large offsets.
+  m_doseShift = QVector3D(0, 0, 0);
+  m_doseVolume.setPatientShift(QVector3D(0, 0, 0));
+  qDebug() << "[Dose Align] Preserving RTDOSE native position (no shift).";
+  return;
+
+  // Decide a simple, robust shift
+  QString ctUID = m_volume.frameOfReferenceUID();
+  QString doseUID = m_doseVolume.frameOfReferenceUID();
+  bool foRMatch = (!ctUID.isEmpty() && !doseUID.isEmpty() && ctUID == doseUID);
+
+  auto isZeroVec = [](const QVector3D &v) {
+    return std::abs(v.x()) < 1e-6 && std::abs(v.y()) < 1e-6 &&
+           std::abs(v.z()) < 1e-6;
+  };
+
+  QVector3D shift(0, 0, 0);
+  QVector3D ctOrigin(m_volume.originX(), m_volume.originY(),
+                     m_volume.originZ());
+  QVector3D doseOrigin(m_doseVolume.originX(), m_doseVolume.originY(),
+                       m_doseVolume.originZ());
+
+  if (foRMatch) {
+    // Prefer origin alignment if RTDose has valid IPP; otherwise fallback to
+    // center alignment
+    if (m_doseVolume.hasIPP()) {
+      shift = ctOrigin - doseOrigin;
+      qDebug() << QString("FoR match: origin-alignment shift: (%1, %2, %3)")
+                      .arg(shift.x(), 0, 'f', 2)
+                      .arg(shift.y(), 0, 'f', 2)
+                      .arg(shift.z(), 0, 'f', 2);
+    } else {
+      QVector3D ctCenter = m_volume.voxelToPatient(m_volume.width() / 2.0,
+                                                   m_volume.height() / 2.0,
+                                                   m_volume.depth() / 2.0);
+      m_doseVolume.setPatientShift(QVector3D(0, 0, 0));
+      QVector3D doseCenter = m_doseVolume.voxelToPatient(
+          m_doseVolume.width() / 2.0, m_doseVolume.height() / 2.0,
+          m_doseVolume.depth() / 2.0);
+      shift = ctCenter - doseCenter;
+      qDebug() << QString("FoR match: center-alignment shift: (%1, %2, %3)")
+                      .arg(shift.x(), 0, 'f', 2)
+                      .arg(shift.y(), 0, 'f', 2)
+                      .arg(shift.z(), 0, 'f', 2);
+    }
+  } else {
+    // FoR mismatch: use center alignment as a simple fallback
+    QVector3D ctCenter =
+        m_volume.voxelToPatient(m_volume.width() / 2.0, m_volume.height() / 2.0,
+                                m_volume.depth() / 2.0);
+    m_doseVolume.setPatientShift(QVector3D(0, 0, 0));
+    QVector3D doseCenter = m_doseVolume.voxelToPatient(
+        m_doseVolume.width() / 2.0, m_doseVolume.height() / 2.0,
+        m_doseVolume.depth() / 2.0);
+    shift = ctCenter - doseCenter;
+    qDebug() << QString("FoR mismatch: center-alignment shift: (%1, %2, %3)")
+                    .arg(shift.x(), 0, 'f', 2)
+                    .arg(shift.y(), 0, 'f', 2)
+                    .arg(shift.z(), 0, 'f', 2);
+  }
+
+  m_doseShift = shift;
+  m_doseVolume.setPatientShift(m_doseShift);
+
+  // Quick verification
+  QVector3D ctCenter = m_volume.voxelToPatient(
+      m_volume.width() / 2, m_volume.height() / 2, m_volume.depth() / 2);
+  QVector3D doseCenterVoxel = m_doseVolume.patientToVoxelContinuous(ctCenter);
+  bool inBounds = (doseCenterVoxel.x() >= -0.5 &&
+                   doseCenterVoxel.x() < m_doseVolume.width() - 0.5 &&
+                   doseCenterVoxel.y() >= -0.5 &&
+                   doseCenterVoxel.y() < m_doseVolume.height() - 0.5 &&
+                   doseCenterVoxel.z() >= -0.5 &&
+                   doseCenterVoxel.z() < m_doseVolume.depth() - 0.5);
+  qDebug() << QString("[Dose Align] Final shift: (%1, %2, %3)")
+                  .arg(m_doseShift.x(), 0, 'f', 2)
+                  .arg(m_doseShift.y(), 0, 'f', 2)
+                  .arg(m_doseShift.z(), 0, 'f', 2);
+  qDebug()
+      << QString(
+             "[Dose Align] CT center -> Dose voxel (%1,%2,%3) | in-bounds: %4")
+             .arg(doseCenterVoxel.x(), 0, 'f', 2)
+             .arg(doseCenterVoxel.y(), 0, 'f', 2)
+             .arg(doseCenterVoxel.z(), 0, 'f', 2)
+             .arg(inBounds ? "YES" : "NO");
+
+  // Extra debug: probe Y+10mm to verify Y mapping (sign/scale)
+  {
+    // X +10mm
+    double dx = 10.0;
+    QVector3D ctCenterPlusX = ctCenter + QVector3D(dx, 0, 0);
+    QVector3D doseVoxX = m_doseVolume.patientToVoxelContinuous(ctCenterPlusX);
+    qDebug()
+        << QString(
+               "[Dose Align Debug] CT center +10mmX -> Dose voxel (%1,%2,%3)")
+               .arg(doseVoxX.x(), 0, 'f', 2)
+               .arg(doseVoxX.y(), 0, 'f', 2)
+               .arg(doseVoxX.z(), 0, 'f', 2);
+    double dy = 10.0; // mm
+    QVector3D ctCenterPlusY = ctCenter + QVector3D(0, dy, 0);
+    QVector3D doseVoxY = m_doseVolume.patientToVoxelContinuous(ctCenterPlusY);
+    qDebug()
+        << QString(
+               "[Dose Align Debug] CT center +10mmY -> Dose voxel (%1,%2,%3)")
+               .arg(doseVoxY.x(), 0, 'f', 2)
+               .arg(doseVoxY.y(), 0, 'f', 2)
+               .arg(doseVoxY.z(), 0, 'f', 2);
+    // Z +10mm
+    double dz = 10.0; // mm
+    QVector3D ctCenterPlusZ = ctCenter + QVector3D(0, 0, dz);
+    QVector3D doseVoxZ = m_doseVolume.patientToVoxelContinuous(ctCenterPlusZ);
+    qDebug()
+        << QString(
+               "[Dose Align Debug] CT center +10mmZ -> Dose voxel (%1,%2,%3)")
+               .arg(doseVoxZ.x(), 0, 'f', 2)
+               .arg(doseVoxZ.y(), 0, 'f', 2)
+               .arg(doseVoxZ.z(), 0, 'f', 2);
+  }
+}
+void DicomViewer::showOrientationMenu(int viewIndex, const QPoint &pos) {
+  if ((m_viewMode != ViewMode::Quad && m_viewMode != ViewMode::Five) ||
+      !isVolumeLoaded())
+    return;
+
+  QMenu menu;
+  QAction *ax = menu.addAction("Axial");
+  QAction *sag = menu.addAction("Sagittal");
+  QAction *cor = menu.addAction("Coronal");
+  QAction *sel = menu.exec(m_imageWidgets[viewIndex]->mapToGlobal(pos));
+  if (!sel)
+    return;
+  if (sel == ax)
+    m_viewOrientations[viewIndex] = DicomVolume::Orientation::Axial;
+  else if (sel == sag)
+    m_viewOrientations[viewIndex] = DicomVolume::Orientation::Sagittal;
+  else if (sel == cor)
+    m_viewOrientations[viewIndex] = DicomVolume::Orientation::Coronal;
+
+  int count = sliceCountForOrientation(m_viewOrientations[viewIndex]);
+  m_sliceSliders[viewIndex]->setRange(0, count > 0 ? count - 1 : 0);
+  int mid = count > 0 ? count / 2 : 0;
+  m_currentIndices[viewIndex] = mid;
+  m_sliceSliders[viewIndex]->setValue(mid);
+  loadVolumeSlice(viewIndex, mid);
+  updateSliceLabels();
+}
+
+void DicomViewer::showJumpToMenu(int viewIndex, const QPoint &pos) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT || !isVolumeLoaded() ||
+      m_isDVHView[viewIndex] || m_is3DView[viewIndex] ||
+      m_isProfileView[viewIndex])
+    return;
+
+  QMenu menu;
+  QAction *jump = menu.addAction("jump to");
+  QAction *sel = menu.exec(m_imageWidgets[viewIndex]->mapToGlobal(pos));
+  if (sel != jump)
+    return;
+
+  QVector3D patient = patientCoordinateAt(viewIndex, pos);
+  if (std::isnan(patient.x()))
+    return;
+  QVector3D voxel = m_volume.patientToVoxelContinuous(patient);
+  int vx = std::clamp(static_cast<int>(std::round(voxel.x())), 0,
+                      m_volume.width() - 1);
+  int vy = std::clamp(static_cast<int>(std::round(voxel.y())), 0,
+                      m_volume.height() - 1);
+  int vz = std::clamp(static_cast<int>(std::round(voxel.z())), 0,
+                      m_volume.depth() - 1);
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_isDVHView[i] || m_is3DView[i] || m_isProfileView[i])
+      continue;
+    int sliceIndex = 0;
+    switch (m_viewOrientations[i]) {
+    case DicomVolume::Orientation::Axial:
+      sliceIndex = vz;
+      break;
+    case DicomVolume::Orientation::Sagittal:
+      sliceIndex = vx;
+      break;
+    case DicomVolume::Orientation::Coronal:
+      sliceIndex = vy;
+      break;
+    }
+    int count = sliceCountForOrientation(m_viewOrientations[i]);
+    sliceIndex = std::clamp(sliceIndex, 0, count > 0 ? count - 1 : 0);
+    m_currentIndices[i] = sliceIndex;
+    m_sliceSliders[i]->setValue(sliceIndex);
+    loadSlice(i, sliceIndex);
+
+    float spacingX = static_cast<float>(m_volume.spacingX());
+    float spacingY = static_cast<float>(m_volume.spacingY());
+    float spacingZ = static_cast<float>(m_volume.spacingZ());
+    float w_mm = 0.0f, h_mm = 0.0f, cx_mm = 0.0f, cy_mm = 0.0f;
+    switch (m_viewOrientations[i]) {
+    case DicomVolume::Orientation::Axial:
+      w_mm = m_volume.width() * spacingX;
+      h_mm = m_volume.height() * spacingY;
+      cx_mm = vx * spacingX - w_mm / 2.0f;
+      cy_mm = h_mm / 2.0f - vy * spacingY;
+      break;
+    case DicomVolume::Orientation::Sagittal:
+      w_mm = m_volume.height() * spacingY;
+      h_mm = m_volume.depth() * spacingZ;
+      cx_mm = vy * spacingY - w_mm / 2.0f;
+      cy_mm = vz * spacingZ - h_mm / 2.0f;
+      break;
+    case DicomVolume::Orientation::Coronal:
+      w_mm = m_volume.width() * spacingX;
+      h_mm = m_volume.depth() * spacingZ;
+      cx_mm = vx * spacingX - w_mm / 2.0f;
+      cy_mm = vz * spacingZ - h_mm / 2.0f;
+      break;
+    }
+    m_imageWidgets[i]->setCursorCross(QPointF(cx_mm, cy_mm));
+  }
+}
+
+bool DicomViewer::eventFilter(QObject *obj, QEvent *event) {
+  if (obj == m_scrollArea->viewport()) {
+    switch (event->type()) {
+    case QEvent::Wheel:
+      wheelEvent(static_cast<QWheelEvent *>(event));
+      return true;
+    case QEvent::MouseButtonPress:
+      mousePressEvent(static_cast<QMouseEvent *>(event));
+      return true;
+    case QEvent::MouseMove:
+      mouseMoveEvent(static_cast<QMouseEvent *>(event));
+      return true;
+    case QEvent::MouseButtonRelease:
+      mouseReleaseEvent(static_cast<QMouseEvent *>(event));
+      return true;
+    default:
+      break;
+    }
+  }
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (obj == m_infoOverlays[i] &&
+        event->type() == QEvent::MouseButtonDblClick) {
+      m_privacyMode = !m_privacyMode;
+      updateImageInfo();
+      updateInfoOverlays();
+      return true;
+    }
+    if (obj == m_imageWidgets[i]) {
+      switch (event->type()) {
+      case QEvent::Wheel:
+        wheelEvent(static_cast<QWheelEvent *>(event));
+        return true;
+      case QEvent::MouseButtonPress:
+        mousePressEvent(static_cast<QMouseEvent *>(event));
+        return true;
+      case QEvent::MouseMove:
+        mouseMoveEvent(static_cast<QMouseEvent *>(event));
+        return true;
+      case QEvent::MouseButtonRelease:
+        mouseReleaseEvent(static_cast<QMouseEvent *>(event));
+        return true;
+      default:
+        break;
+      }
+    }
+  }
+  if (obj == m_infoTextBox) {
+    if (event->type() == QEvent::MouseButtonDblClick) {
+      m_privacyMode = !m_privacyMode;
+      updateImageInfo();
+      updateInfoOverlays();
+      return true;
+    } else if (event->type() == QEvent::MouseButtonPress) {
+      // 単一クリック時にテキスト選択などが起こらないようにイベントを消費
+      return true;
+    }
+  }
+  return QWidget::eventFilter(obj, event);
+}
+
+void DicomViewer::onDoseDisplayModeChanged() {
+  if (!m_doseColorMapCombo) {
+    return;
+  }
+
+  switch (m_doseColorMapCombo->currentIndex()) {
+  case 0:
+    m_doseDisplayMode = DoseResampledVolume::DoseDisplayMode::Colorful;
+    break;
+  case 1:
+    m_doseDisplayMode = DoseResampledVolume::DoseDisplayMode::Isodose;
+    break;
+  case 2:
+    m_doseDisplayMode = DoseResampledVolume::DoseDisplayMode::IsodoseLines;
+    break;
+  case 3:
+    m_doseDisplayMode = DoseResampledVolume::DoseDisplayMode::Simple;
+    break;
+  case 4:
+    m_doseDisplayMode = DoseResampledVolume::DoseDisplayMode::Hot;
+    break;
+  default:
+    m_doseDisplayMode = DoseResampledVolume::DoseDisplayMode::Colorful;
+    break;
+  }
+
+  updateColorBars();
+  updateImage(); // 表示を更新
+}
+
+void DicomViewer::onDoseRangeEditingFinished() {
+  updateColorBars();
+  updateImage();
+}
+
+void DicomViewer::onDoseOpacityChanged(int value) {
+  m_doseOpacity = static_cast<double>(value) / 100.0;
+  updateImage();
+}
+
+void DicomViewer::onDoseListContextMenu(const QPoint &pos) {
+  if (!m_doseListWidget)
+    return;
+  QListWidgetItem *item = m_doseListWidget->itemAt(pos);
+  if (!item)
+    return;
+  int row = m_doseListWidget->row(item);
+  QMenu menu;
+  QAction *copyAct = menu.addAction(tr("Copy"));
+  QAction *delAct = menu.addAction(tr("Delete"));
+  QAction *chosen = menu.exec(m_doseListWidget->mapToGlobal(pos));
+  if (chosen == copyAct)
+    copyDoseAt(row);
+  else if (chosen == delAct)
+    deleteDoseAt(row);
+}
+
+void DicomViewer::copyDoseAt(int index) {
+  if (!m_doseListWidget || index < 0 ||
+      index >= static_cast<int>(m_doseItems.size()))
+    return;
+  const auto &src = m_doseItems[index];
+  QListWidgetItem *item = new QListWidgetItem();
+  m_doseListWidget->insertItem(index + 1, item);
+  QString label = src.widget ? src.widget->name() + tr(" (copy)") : tr("Copy");
+  DoseItemWidget *widget = new DoseItemWidget(label, src.dose.maxDose());
+  widget->setChecked(src.widget && src.widget->isChecked());
+  widget->setDataFractions(src.widget ? src.widget->dataFractions() : 1.0);
+  widget->setDisplayFractions(src.widget ? src.widget->displayFractions()
+                                         : 1.0);
+  widget->setShift(src.widget ? src.widget->shift() : QVector3D());
+  item->setSizeHint(widget->sizeHint());
+  m_doseListWidget->setItemWidget(item, widget);
+
+  connect(widget, &DoseItemWidget::uiExpandedChanged, this,
+          [this, item, widget]() {
+            QTimer::singleShot(0, this, [this, item, widget]() {
+              widget->adjustSize();
+              item->setSizeHint(widget->sizeHint());
+              m_doseListWidget->setItemWidget(item, widget);
+              m_doseListWidget->doItemsLayout();
+              if (m_doseListWidget->viewport())
+                m_doseListWidget->viewport()->update();
+            });
+          });
+  connect(widget, &DoseItemWidget::settingsChanged, this, [this]() {
+    m_resampledDose.clear();
+    m_doseLoaded = false;
+    updateColorBars();
+    updateImage();
+  });
+  connect(widget, &DoseItemWidget::visibilityChanged, this,
+          [this](bool) {
+            onDoseCalculateClicked();
+            updateDoseShiftLabels();
+          });
+
+  // Connect save button
+  connect(widget, &DoseItemWidget::saveRequested, this, [this, widget]() {
+    onDoseSaveRequested(widget);
+  });
+
+  DoseItem newItem;
+  newItem.volume = src.volume;
+  newItem.widget = widget;
+  newItem.dose = src.dose;
+  newItem.isSaved = src.isSaved;
+  newItem.savedFilePath = src.savedFilePath;
+  if (widget) {
+    widget->setSaved(src.isSaved);
+  }
+  m_doseItems.insert(m_doseItems.begin() + index + 1, newItem);
+
+  onDoseCalculateClicked();
+  updateDoseShiftLabels();
+}
+
+void DicomViewer::deleteDoseAt(int index) {
+  if (!m_doseListWidget || index < 0 ||
+      index >= static_cast<int>(m_doseItems.size()))
+    return;
+  QListWidgetItem *item = m_doseListWidget->takeItem(index);
+  if (item)
+    delete item;
+  DoseItem removed = m_doseItems[index];
+  if (removed.widget)
+    delete removed.widget;
+  m_doseItems.erase(m_doseItems.begin() + index);
+  onDoseCalculateClicked();
+  updateDoseShiftLabels();
+}
+
+void DicomViewer::onDoseSaveRequested(DoseItemWidget *widget) {
+  if (!widget)
+    return;
+
+  // Find the corresponding DoseItem
+  auto it = std::find_if(m_doseItems.begin(), m_doseItems.end(),
+                        [widget](const DoseItem &item) {
+                          return item.widget == widget;
+                        });
+
+  if (it == m_doseItems.end()) {
+    qWarning() << "DoseItem not found for widget";
+    return;
+  }
+
+  // Get patient info for file path
+  DicomStudyInfo studyInfo = currentStudyInfo();
+  QString patientKey;
+  if (!studyInfo.patientName.isEmpty() && !studyInfo.patientID.isEmpty()) {
+    patientKey = QString("%1_%2").arg(studyInfo.patientName).arg(studyInfo.patientID);
+  } else {
+    QMessageBox::warning(this, tr("Save RT-Dose"),
+                        tr("Cannot save: No patient information available.\n"
+                           "Please load a patient study first."));
+    return;
+  }
+
+  // Build file path in patient folder
+  QString filename;
+  if (m_databaseManager && m_databaseManager->isOpen()) {
+    QString dataRoot = QString::fromStdString(m_databaseManager->dataRoot());
+    QString patientDir = QDir(dataRoot).filePath("Patients/" + patientKey);
+
+    // Create patient directory if it doesn't exist
+    QDir().mkpath(patientDir);
+
+    // Create RTDOSE subdirectory for calculated doses
+    QString rtdoseDir = QDir(patientDir).filePath("RTDOSE_Calculated");
+    QDir().mkpath(rtdoseDir);
+
+    // Generate filename with timestamp
+    QString calculationType = widget->name().replace(" ", "_");
+    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    QString baseName = QString("%1_%2.dcm").arg(calculationType).arg(timestamp);
+    filename = QDir(rtdoseDir).filePath(baseName);
+
+    qDebug() << "Auto-saving dose to:" << filename;
+  } else {
+    // Fallback: ask user for location if database not available
+    QString defaultName = widget->name();
+    if (!defaultName.endsWith(".dcm", Qt::CaseInsensitive)) {
+      defaultName += ".dcm";
+    }
+
+    filename = QFileDialog::getSaveFileName(
+        this, tr("Save RT-Dose"), defaultName,
+        tr("DICOM RT-Dose Files (*.dcm);;All Files (*)"));
+
+    if (filename.isEmpty())
+      return; // User cancelled
+  }
+
+  // Save the dose volume
+  bool success = it->dose.saveToFile(filename, [](int current, int total) {
+    // Progress callback - could show a progress dialog if needed
+    qDebug() << "Saving dose:" << current << "/" << total;
+  });
+
+  if (success) {
+    // Update saved status
+    it->isSaved = true;
+    it->savedFilePath = filename;
+    widget->setSaved(true);
+
+    // Save to database
+    qDebug() << "=== Database Save Debug ===";
+    qDebug() << "m_databaseManager:" << (m_databaseManager ? "Valid" : "NULL");
+
+    if (!m_databaseManager) {
+      qWarning() << "DatabaseManager is NULL - cannot save to database";
+    } else if (!m_databaseManager->isOpen()) {
+      qWarning() << "DatabaseManager is not open - cannot save to database";
+      qWarning() << "Database path:" << QString::fromStdString(m_databaseManager->databasePath());
+    } else {
+      qDebug() << "DatabaseManager is ready, proceeding with save";
+      qDebug() << "Database path:" << QString::fromStdString(m_databaseManager->databasePath());
+
+      // Helper function to escape SQL strings (replace ' with '')
+      auto escapeSql = [](const QString &str) -> std::string {
+        QString escaped = str;
+        escaped.replace("'", "''");
+        return escaped.toStdString();
+      };
+
+      // Get dose information
+      const RTDoseVolume &dose = it->dose;
+      QString calculationType = widget->name();
+
+      // Get patient info if available
+      DicomStudyInfo studyInfo = currentStudyInfo();
+      QString patientKey;
+      if (!studyInfo.patientName.isEmpty() && !studyInfo.patientID.isEmpty()) {
+        patientKey = QString("%1_%2").arg(studyInfo.patientName).arg(studyInfo.patientID);
+      }
+
+      qDebug() << "Calculation type:" << calculationType;
+      qDebug() << "Patient key:" << (patientKey.isEmpty() ? "NULL" : patientKey);
+      qDebug() << "File path:" << filename;
+      qDebug() << "Dose dimensions:" << dose.width() << "x" << dose.height() << "x" << dose.depth();
+      qDebug() << "Max dose:" << dose.maxDose();
+
+      // Build SQL INSERT statement
+      std::ostringstream sql;
+      sql << "INSERT INTO dose_volumes (";
+      sql << "patient_key, calculation_type, file_path, format, ";
+      sql << "width, height, depth, ";
+      sql << "spacing_x, spacing_y, spacing_z, ";
+      sql << "origin_x, origin_y, origin_z, ";
+      sql << "max_dose, frame_uid, description";
+      sql << ") VALUES (";
+
+      // patient_key (can be NULL)
+      if (patientKey.isEmpty()) {
+        sql << "NULL, ";
+      } else {
+        sql << "'" << escapeSql(patientKey) << "', ";
+      }
+
+      // calculation_type
+      sql << "'" << escapeSql(calculationType) << "', ";
+
+      // file_path
+      sql << "'" << escapeSql(filename) << "', ";
+
+      // format
+      sql << "'RTDOSE', ";
+
+      // dimensions
+      sql << dose.width() << ", " << dose.height() << ", " << dose.depth() << ", ";
+
+      // spacing
+      sql << dose.spacingX() << ", " << dose.spacingY() << ", " << dose.spacingZ() << ", ";
+
+      // origin
+      sql << dose.originX() << ", " << dose.originY() << ", " << dose.originZ() << ", ";
+
+      // max_dose
+      sql << dose.maxDose() << ", ";
+
+      // frame_uid
+      if (dose.frameOfReferenceUID().isEmpty()) {
+        sql << "NULL, ";
+      } else {
+        sql << "'" << escapeSql(dose.frameOfReferenceUID()) << "', ";
+      }
+
+      // description
+      QString description = QString("Dose calculation: %1").arg(calculationType);
+      sql << "'" << escapeSql(description) << "'";
+
+      sql << ");";
+
+      // Log the SQL statement
+      QString sqlStr = QString::fromStdString(sql.str());
+      qDebug() << "Executing SQL:" << sqlStr;
+
+      // First, check if study already exists, otherwise create it
+      int studyId = -1;
+      QFileInfo fileInfo(filename);
+      QString relativePath = fileInfo.fileName();
+      QString directoryPath = fileInfo.absolutePath();
+
+      // Try to find existing study for ShioRIS3 calculated doses
+      std::ostringstream findStudySql;
+      findStudySql << "SELECT id FROM studies WHERE ";
+      findStudySql << "patient_key='" << escapeSql(patientKey) << "' AND ";
+      findStudySql << "modality='RTDOSE' AND ";
+      findStudySql << "study_name='ShioRIS3 Calculated Dose' AND ";
+      findStudySql << "path='" << escapeSql(directoryPath) << "'";
+
+      if (!dose.frameOfReferenceUID().isEmpty()) {
+        findStudySql << " AND frame_uid='" << escapeSql(dose.frameOfReferenceUID()) << "'";
+      }
+
+      findStudySql << " LIMIT 1;";
+
+      bool foundExisting = m_databaseManager->query(findStudySql.str(),
+        [&studyId](int argc, char** argv, char**) {
+          if (argc > 0 && argv[0]) {
+            studyId = std::atoi(argv[0]);
+          }
+        });
+
+      // If not found, create new study
+      if (studyId <= 0) {
+        std::ostringstream studiesSql;
+        studiesSql << "INSERT INTO studies (";
+        studiesSql << "patient_key, modality, study_name, path, ";
+        studiesSql << "frame_uid, series_uid, series_description";
+        studiesSql << ") VALUES (";
+        studiesSql << "'" << escapeSql(patientKey) << "', ";
+        studiesSql << "'RTDOSE', ";
+        studiesSql << "'ShioRIS3 Calculated Dose', ";
+        studiesSql << "'" << escapeSql(directoryPath) << "', ";
+
+        if (dose.frameOfReferenceUID().isEmpty()) {
+          studiesSql << "NULL, NULL, ";
+        } else {
+          studiesSql << "'" << escapeSql(dose.frameOfReferenceUID()) << "', ";
+          studiesSql << "'" << escapeSql(dose.frameOfReferenceUID()) << "', ";
+        }
+
+        studiesSql << "'" << escapeSql(calculationType) << "'";
+        studiesSql << ");";
+
+        if (m_databaseManager->exec(studiesSql.str())) {
+          qDebug() << "New study created successfully";
+
+          // Get the study_id of the inserted record
+          std::string getIdSql = "SELECT last_insert_rowid();";
+          m_databaseManager->query(getIdSql, [&studyId](int argc, char** argv, char**) {
+            if (argc > 0 && argv[0]) {
+              studyId = std::atoi(argv[0]);
+            }
+          });
+          qDebug() << "New Study ID:" << studyId;
+        } else {
+          qWarning() << "Failed to create study:" << QString::fromStdString(m_databaseManager->lastError());
+        }
+      } else {
+        qDebug() << "Reusing existing study ID:" << studyId;
+      }
+
+      // Now insert into dose_volumes and files if we have a valid study_id
+      if (studyId > 0) {
+        // Now insert into dose_volumes with study_id
+        sql.str("");
+        sql.clear();
+        sql << "INSERT INTO dose_volumes (";
+        sql << "patient_key, study_id, calculation_type, file_path, format, ";
+        sql << "width, height, depth, ";
+        sql << "spacing_x, spacing_y, spacing_z, ";
+        sql << "origin_x, origin_y, origin_z, ";
+        sql << "max_dose, frame_uid, description";
+        sql << ") VALUES (";
+        sql << "'" << escapeSql(patientKey) << "', ";
+        sql << studyId << ", ";
+        sql << "'" << escapeSql(calculationType) << "', ";
+        sql << "'" << escapeSql(filename) << "', ";
+        sql << "'RTDOSE', ";
+        sql << dose.width() << ", " << dose.height() << ", " << dose.depth() << ", ";
+        sql << dose.spacingX() << ", " << dose.spacingY() << ", " << dose.spacingZ() << ", ";
+        sql << dose.originX() << ", " << dose.originY() << ", " << dose.originZ() << ", ";
+        sql << dose.maxDose() << ", ";
+
+        if (dose.frameOfReferenceUID().isEmpty()) {
+          sql << "NULL, ";
+        } else {
+          sql << "'" << escapeSql(dose.frameOfReferenceUID()) << "', ";
+        }
+
+        sql << "'" << escapeSql(description) << "'";
+        sql << ");";
+
+        // Execute the SQL statement for dose_volumes
+        if (m_databaseManager->exec(sql.str())) {
+          qDebug() << "SUCCESS: Dose volume saved to database";
+
+          // Also register in files table
+          QFileInfo fileInfoForSize(filename);
+          qint64 fileSize = fileInfoForSize.size();
+
+          std::ostringstream filesSql;
+          filesSql << "INSERT INTO files (";
+          filesSql << "study_id, relative_path, size_bytes, file_type";
+          filesSql << ") VALUES (";
+          filesSql << studyId << ", ";
+          filesSql << "'" << escapeSql(relativePath) << "', ";
+          filesSql << fileSize << ", ";
+          filesSql << "'DICOM'";
+          filesSql << ");";
+
+          if (m_databaseManager->exec(filesSql.str())) {
+            qDebug() << "File registered in files table";
+          } else {
+            qWarning() << "Failed to register file:" << QString::fromStdString(m_databaseManager->lastError());
+          }
+        }
+
+        // Verify the save by querying the database
+        std::string countSql = "SELECT COUNT(*) FROM dose_volumes;";
+        int count = 0;
+        m_databaseManager->query(countSql, [&count](int argc, char** argv, char**) {
+          if (argc > 0 && argv[0]) {
+            count = std::atoi(argv[0]);
+          }
+        });
+        qDebug() << "Total dose_volumes records in database:" << count;
+      } else {
+        QString errorMsg = QString::fromStdString(m_databaseManager->lastError());
+        qWarning() << "FAILED: Could not save dose volume to database";
+        qWarning() << "SQLite error:" << errorMsg;
+        qWarning() << "SQL was:" << sqlStr;
+      }
+    }
+    qDebug() << "=== End Database Save Debug ===";
+
+    QMessageBox::information(this, tr("Save RT-Dose"),
+                            tr("Dose distribution saved successfully to:\n%1")
+                                .arg(filename));
+  } else {
+    QMessageBox::warning(this, tr("Save RT-Dose"),
+                        tr("Failed to save dose distribution to:\n%1")
+                            .arg(filename));
+  }
+}
+
+void DicomViewer::onDoseCalculateClicked() {
+  qDebug() << "onDoseCalculateClicked: m_doseItems.size =" << m_doseItems.size();
+  if (m_doseItems.empty()) {
+    m_doseLoaded = false;
+    m_doseVisible = false;
+    qDebug() << "  -> m_doseItems is empty, set m_doseVisible = false";
+    m_resampledDose.clear();
+  } else {
+    // Fast path: single dose, no shifts, unity fractions -> reuse existing
+    // resample
+    if (m_doseItems.size() == 1) {
+      const auto &it0 = m_doseItems.front();
+      const bool unityFr =
+          (it0.widget && std::abs(it0.widget->dataFractions() - 1.0) < 1e-6 &&
+           std::abs(it0.widget->displayFractions() - 1.0) < 1e-6);
+      const bool zeroShift =
+          (it0.widget && std::abs(it0.widget->shiftX()) < 1e-6 &&
+           std::abs(it0.widget->shiftY()) < 1e-6 &&
+           std::abs(it0.widget->shiftZ()) < 1e-6);
+      const bool baseZero =
+          (std::abs(computeAlignmentShift(it0.dose).x()) < 1e-6 &&
+           std::abs(computeAlignmentShift(it0.dose).y()) < 1e-6 &&
+           std::abs(computeAlignmentShift(it0.dose).z()) < 1e-6);
+      const bool visible = (it0.widget && it0.widget->isChecked());
+      qDebug() << "  Fast path: visible=" << visible << "unityFr=" << unityFr
+               << "zeroShift=" << zeroShift << "baseZero=" << baseZero
+               << "isResampled=" << m_resampledDose.isResampled();
+      if (visible && unityFr && zeroShift && baseZero &&
+          m_resampledDose.isResampled()) {
+        m_doseLoaded = true;
+        m_doseVisible = true;
+        qDebug() << "  -> Fast path taken, set m_doseVisible = true";
+        resetDoseRange();
+        updateColorBars();
+        updateImage();
+        updateImageInfo();
+        return;
+      }
+    }
+    const auto &base = m_doseItems.front().volume;
+    int sizes[3] = {base.depth(), base.height(), base.width()};
+    cv::Mat sum(3, sizes, CV_32F, cv::Scalar(0));
+
+    bool any = false;
+    for (const auto &it : m_doseItems) {
+      bool isChecked = it.widget && it.widget->isChecked();
+      qDebug() << "    dose item:" << (it.widget ? it.widget->name() : "no-widget")
+               << "isChecked =" << isChecked;
+      if (!isChecked)
+        continue;
+      any = true;
+      // Apply combined shift: alignment shift + user shift
+      QVector3D baseShift = computeAlignmentShift(it.dose);
+      QVector3D userShift = it.widget->shift();
+      RTDoseVolume shiftedDose = it.dose; // copy
+      shiftedDose.setPatientShift(baseShift + userShift);
+
+      DoseResampledVolume res;
+      bool ok = res.resampleFromRTDose(m_volume, shiftedDose);
+      if (!ok)
+        continue;
+
+      const cv::Mat &src = res.data();
+      // Per-slice parallel accumulation to improve throughput
+      const int W = base.width();
+      const int H = base.height();
+      const int D = base.depth();
+      const double dataFr = it.widget->dataFractions();
+      const double displayFr = it.widget->displayFractions();
+      const double factor = it.widget->factor();
+      QVector<int> zIndices(D);
+      std::iota(zIndices.begin(), zIndices.end(), 0);
+      QtConcurrent::blockingMap(zIndices, [&](int z) {
+        const float *s = src.ptr<float>(z);
+        float *d = sum.ptr<float>(z);
+        for (int y = 0; y < H; ++y) {
+          int row = y * W;
+          for (int x = 0; x < W; ++x) {
+            float raw = s[row + x];
+            double val = transformDose(raw, dataFr, displayFr) * factor;
+            d[row + x] += static_cast<float>(val);
+          }
+        }
+      });
+    }
+
+    qDebug() << "  -> any =" << any << "after checking all dose items";
+    if (any) {
+      m_resampledDose.setFromMat(sum, base.spacingX(), base.spacingY(),
+                                 base.spacingZ(), base.originX(),
+                                 base.originY(), base.originZ());
+      m_doseLoaded = true;
+      m_doseVisible = true;
+      qDebug() << "  -> Set m_doseVisible = true because any = true";
+      resetDoseRange();
+      if (m_doseRefSpinBox) {
+        double maxDose = m_resampledDose.maxDose();
+        m_doseRefSpinBox->setValue(maxDose);
+        m_doseReference = maxDose;
+      }
+    } else {
+      m_resampledDose.clear();
+      m_doseLoaded = false;
+      m_doseVisible = false;
+      qDebug() << "  -> Set m_doseVisible = false because any = false (no checked items)";
+      if (m_doseRefSpinBox) {
+        m_doseRefSpinBox->setValue(0.0);
+      }
+      m_doseReference = 0.0;
+      if (m_doseMinSpinBox && m_doseMaxSpinBox) {
+        m_doseMinSpinBox->setValue(0.0);
+        m_doseMaxSpinBox->setValue(0.0);
+      }
+      m_doseMinRange = 0.0;
+      m_doseMaxRange = 0.0;
+    }
+  }
+
+  m_dvhData.clear();
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_dvhWidgets[i]) {
+      m_dvhWidgets[i]->setDVHData({});
+      m_dvhWidgets[i]->setPatientInfo(QString());
+    }
+  }
+
+  updateColorBars();
+  updateImage();
+  // Update info panel to reflect current RT Dose status
+  updateImageInfo();
+}
+
+void DicomViewer::onRandomStudyClicked() {
+  // Open a simple dialog placeholder for future DVH display
+  auto *dlg = new RandomStudyDialog(this);
+  dlg->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+  // Pass ROI names if RTSTRUCT is loaded
+  if (m_rtstructLoaded) {
+    QStringList roiNames;
+    for (int r = 0; r < m_rtstruct.roiCount(); ++r) {
+      roiNames << m_rtstruct.roiName(r);
+    }
+    dlg->setROINames(roiNames);
+  }
+  // Set dose axis suggestion
+  if (m_doseLoaded && m_resampledDose.isResampled()) {
+    dlg->setDoseAxisMax(m_resampledDose.maxDose());
+  }
+
+  // Start Monte Carlo simulation on request
+  connect(
+      dlg, &RandomStudyDialog::startCalculationRequested, this, [this, dlg]() {
+        // Clear any previous cache to ensure fresh results
+        dlg->clearCache();
+        if (!isVolumeLoaded() || !m_doseLoaded || !m_rtstructLoaded) {
+          QMessageBox::warning(dlg, tr("Random Study"),
+                               tr("CT, RT Dose and RTSTRUCT must be loaded."));
+          return;
+        }
+        int roiIndex = dlg->selectedROIIndex();
+        if (roiIndex < 0 || roiIndex >= m_rtstruct.roiCount()) {
+          QMessageBox::warning(dlg, tr("Random Study"),
+                               tr("Please select a ROI."));
+          return;
+        }
+        int nFr = std::max(1, dlg->fractionCount());
+        int nIter = std::max(1, dlg->iterationCount());
+        double sysMx, sysMy, sysMz, sysSx, sysSy, sysSz;
+        dlg->systematicError(sysMx, sysMy, sysMz, sysSx, sysSy, sysSz);
+        double randSx, randSy, randSz;
+        dlg->randomError(randSx, randSy, randSz);
+
+        // Cache ROI patient coordinates (voxel centers) within bounding box and
+        // inside ROI
+        QVector3D roiMin, roiMax;
+        if (!m_rtstruct.roiBoundingBox(roiIndex, roiMin, roiMax)) {
+          QMessageBox::warning(dlg, tr("Random Study"),
+                               tr("ROI has no bounding box."));
+          return;
+        }
+        QVector3D minVox = m_volume.patientToVoxelContinuous(roiMin);
+        QVector3D maxVox = m_volume.patientToVoxelContinuous(roiMax);
+        int x0 = std::clamp(
+            static_cast<int>(std::floor(std::min(minVox.x(), maxVox.x()))), 0,
+            m_volume.width() - 1);
+        int x1 = std::clamp(
+            static_cast<int>(std::ceil(std::max(minVox.x(), maxVox.x()))), 0,
+            m_volume.width() - 1);
+        int y0 = std::clamp(
+            static_cast<int>(std::floor(std::min(minVox.y(), maxVox.y()))), 0,
+            m_volume.height() - 1);
+        int y1 = std::clamp(
+            static_cast<int>(std::ceil(std::max(minVox.y(), maxVox.y()))), 0,
+            m_volume.height() - 1);
+        int z0 = std::clamp(static_cast<int>(static_cast<int>(
+                                std::floor(std::min(minVox.z(), maxVox.z())))),
+                            0, m_volume.depth() - 1);
+        int z1 = std::clamp(
+            static_cast<int>(std::ceil(std::max(minVox.z(), maxVox.z()))), 0,
+            m_volume.depth() - 1);
+
+        std::vector<QVector3D> roiPatientPoints;
+        roiPatientPoints.reserve((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) /
+                                 10);
+        for (int z = z0; z <= z1; ++z) {
+          for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+              QVector3D patient =
+                  m_volume.voxelToPatient(x + 0.5, y + 0.5, z + 0.5);
+              if (m_rtstruct.isPointInsideROI(patient, roiIndex)) {
+                roiPatientPoints.push_back(patient);
+              }
+            }
+          }
+        }
+        if (roiPatientPoints.empty()) {
+          QMessageBox::warning(dlg, tr("Random Study"),
+                               tr("No points found inside ROI."));
+          return;
+        }
+
+        // Prepare dialog plot and baseline (depending on view)
+        const auto vm = dlg->viewMode();
+        const auto ht = dlg->histogramType();
+        const double hparam = dlg->histogramParam();
+        const int hbins = dlg->histogramBins();
+        dlg->clearPlot();
+        if (vm == RandomStudyDialog::ViewMode::DVH) {
+          dlg->prepareDVHAxes();
+          if (m_resampledDose.isResampled())
+            dlg->setDoseAxisMax(m_resampledDose.maxDose());
+        }
+
+        // Baseline histogram (no error): always compute and store, and plot DVH
+        // if in DVH view
+        {
+          const double voxelVolume =
+              m_volume.spacingX() * m_volume.spacingY() * m_volume.spacingZ();
+          const double maxDose = m_resampledDose.maxDose();
+          const double binSize = std::max(0.001, maxDose / 200.0);
+          const int binCount = std::min(
+              5000, static_cast<int>(std::ceil((maxDose + binSize) / binSize)));
+          std::vector<double> hist(binCount, 0.0);
+          for (const auto &p : roiPatientPoints) {
+            QVector3D v = m_volume.patientToVoxelContinuous(p);
+            float dval = sampleResampledDose(v);
+            int b = static_cast<int>(dval / binSize);
+            if (b >= 0 && b < binCount)
+              hist[b] += voxelVolume;
+          }
+          const double totalVol = roiPatientPoints.size() * voxelVolume;
+          // store baseline histogram in dialog
+          QVector<float> baseF;
+          baseF.resize(binCount);
+          for (int i = 0; i < binCount; ++i)
+            baseF[i] = static_cast<float>(hist[i]);
+          QMetaObject::invokeMethod(
+              dlg,
+              [dlg, baseF, binSize, totalVol]() {
+                if (dlg)
+                  dlg->setBaselineHistogram(baseF, binSize, totalVol);
+              },
+              Qt::QueuedConnection);
+          if (vm == RandomStudyDialog::ViewMode::DVH) {
+            double cumulative = 0.0;
+            QVector<double> x, y;
+            x.reserve(binCount);
+            y.reserve(binCount);
+            for (int i = binCount - 1; i >= 0; --i) {
+              cumulative += hist[i];
+              double volPct =
+                  totalVol > 0.0 ? (cumulative / totalVol * 100.0) : 0.0;
+              x.push_back(i * binSize);
+              y.push_back(volPct);
+            }
+            std::reverse(x.begin(), x.end());
+            std::reverse(y.begin(), y.end());
+            // Baseline curve in opaque color
+            QColor baseColor = QColor::fromHsv((roiIndex * 40) % 360, 220, 255);
+            baseColor.setAlpha(255);
+            dlg->addDVHCurve(x, y, baseColor, true, 2);
+          }
+        }
+
+        // Prepare running state
+        dlg->setRunning(true);
+        auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+        connect(dlg, &RandomStudyDialog::cancelCalculationRequested, dlg,
+                [cancelFlag]() {
+                  if (cancelFlag)
+                    cancelFlag->store(true);
+                });
+
+        // Run simulation asynchronously
+        QPointer<RandomStudyDialog> dlgPtr(dlg);
+        const bool fixSeed = dlg->isSeedFixed();
+        const quint64 seedVal = dlg->seedValue();
+        auto worker = [this, dlgPtr,
+                       roiPatientPoints = std::move(roiPatientPoints), roiIndex,
+                       nFr, nIter, sysMx, sysMy, sysMz, sysSx, sysSy, sysSz,
+                       randSx, randSy, randSz, fixSeed, seedVal, cancelFlag, vm,
+                       ht, hparam, hbins]() {
+          // Random generators
+          std::mt19937_64 gen;
+          if (fixSeed) {
+            gen.seed(seedVal);
+          } else {
+            std::random_device rd;
+            gen.seed((static_cast<quint64>(rd()) << 32) ^ rd());
+          }
+          std::normal_distribution<double> sysX(sysMx, std::max(0.0, sysSx));
+          std::normal_distribution<double> sysY(sysMy, std::max(0.0, sysSy));
+          std::normal_distribution<double> sysZ(sysMz, std::max(0.0, sysSz));
+          std::normal_distribution<double> rndX(0.0, std::max(0.0, randSx));
+          std::normal_distribution<double> rndY(0.0, std::max(0.0, randSy));
+          std::normal_distribution<double> rndZ(0.0, std::max(0.0, randSz));
+
+          const double voxelVolume =
+              m_volume.spacingX() * m_volume.spacingY() * m_volume.spacingZ();
+          const double maxDose = m_resampledDose.maxDose();
+          const double binSize = std::max(0.001, maxDose / 200.0);
+          const int binCount = std::min(
+              5000, static_cast<int>(std::ceil((maxDose + binSize) / binSize)));
+
+          const int maxCurves = 100;
+          const int stride = std::max(1, (nIter + maxCurves - 1) / maxCurves);
+          int plotted = 0;
+          QVector<double> metricVals;
+          metricVals.reserve(nIter);
+
+          // Cache all iteration histograms for instant recomputation later
+          QVector<QVector<float>> cachedHists;
+          cachedHists.reserve(nIter);
+          auto updateHistogram = [&](const QVector<double> &vals) {
+            if (!dlgPtr)
+              return;
+            QString xLabel = QObject::tr("Value");
+            switch (ht) {
+            case RandomStudyDialog::HistType::DxCc:
+            case RandomStudyDialog::HistType::DxPct:
+            case RandomStudyDialog::HistType::MinDose:
+            case RandomStudyDialog::HistType::MaxDose:
+            case RandomStudyDialog::HistType::MeanDose:
+              xLabel = QObject::tr("Dose [Gy]");
+              break;
+            case RandomStudyDialog::HistType::VdCc:
+              xLabel = QObject::tr("Volume [cc]");
+              break;
+            }
+            // Compute mean and percentiles (5,10,25,75,90,95)
+            double mean = 0.0;
+            QVector<double> sorted = vals;
+            if (!sorted.isEmpty()) {
+              for (double v : sorted)
+                mean += v;
+              mean /= static_cast<double>(sorted.size());
+              std::sort(sorted.begin(), sorted.end());
+            }
+            auto pctAt = [&](double p) -> double {
+              if (sorted.isEmpty())
+                return 0.0;
+              double pos = p * (sorted.size() - 1) / 100.0;
+              int idx = static_cast<int>(std::floor(pos));
+              int idx2 = std::min(static_cast<int>(sorted.size() - 1), idx + 1);
+              double t = pos - idx;
+              return sorted[idx] * (1.0 - t) +
+                     sorted[idx2] * t; // linear interp
+            };
+            QVector<QPair<double, QString>> marks;
+            marks << qMakePair(pctAt(5.0), QObject::tr("P5"))
+                  << qMakePair(pctAt(10.0), QObject::tr("P10"))
+                  << qMakePair(pctAt(25.0), QObject::tr("P25"))
+                  << qMakePair(pctAt(75.0), QObject::tr("P75"))
+                  << qMakePair(pctAt(90.0), QObject::tr("P90"))
+                  << qMakePair(pctAt(95.0), QObject::tr("P95"));
+
+            QMetaObject::invokeMethod(
+                dlgPtr,
+                [dlgPtr, vals, xLabel, hbins, mean, marks]() {
+                  if (!dlgPtr)
+                    return;
+                  dlgPtr->plotHistogram(vals, hbins, xLabel,
+                                        QObject::tr("Count"));
+                  dlgPtr->setHistogramMarkers(mean, marks);
+                },
+                Qt::QueuedConnection);
+          };
+          for (int it = 0; it < nIter; ++it) {
+            if (!dlgPtr)
+              return; // dialog deleted
+            if (cancelFlag && cancelFlag->load())
+              break;
+            // sample systematic per iteration
+            const QVector3D sys(sysX(gen), sysY(gen), sysZ(gen));
+            // Pre-sample a single random setup shift for each fraction (global
+            // per Fr)
+            std::vector<QVector3D> fracDeltas;
+            fracDeltas.reserve(nFr);
+            for (int f = 0; f < nFr; ++f) {
+              QVector3D rnd(rndX(gen), rndY(gen), rndZ(gen));
+              fracDeltas.push_back(sys + rnd);
+            }
+
+            std::vector<double> doses;
+            doses.reserve(roiPatientPoints.size());
+            for (const auto &p : roiPatientPoints) {
+              double total = 0.0;
+              for (int f = 0; f < nFr; ++f) {
+                const QVector3D &delta = fracDeltas[f];
+                QVector3D shifted =
+                    p - delta; // patient shift +delta => sample at p - delta
+                QVector3D v = m_volume.patientToVoxelContinuous(shifted);
+                float dval = sampleResampledDose(v);
+                total += static_cast<double>(dval);
+              }
+              doses.push_back(total / static_cast<double>(nFr));
+            }
+
+            // Build histogram (non-cumulative volume per dose bin)
+            std::vector<double> hist(binCount, 0.0);
+            for (double d : doses) {
+              int b = static_cast<int>(d / binSize);
+              if (b >= 0 && b < binCount)
+                hist[b] += voxelVolume;
+            }
+            // Save a float copy into cache (memory efficient)
+            QVector<float> histF;
+            histF.resize(binCount);
+            for (int i = 0; i < binCount; ++i)
+              histF[i] = static_cast<float>(hist[i]);
+            cachedHists.push_back(std::move(histF));
+            // cumulative from high to low
+            double cumulative = 0.0;
+            const double totalVol = doses.size() * voxelVolume;
+            QVector<double> x, y;
+            x.reserve(binCount);
+            y.reserve(binCount);
+            for (int i = binCount - 1; i >= 0; --i) {
+              cumulative += hist[i];
+              double volPct =
+                  totalVol > 0.0 ? (cumulative / totalVol * 100.0) : 0.0;
+              x.push_back(i * binSize);
+              y.push_back(volPct);
+            }
+            std::reverse(x.begin(), x.end());
+            std::reverse(y.begin(), y.end());
+
+            // Emit plot update on GUI thread, but limit to ~100 curves
+            if (!dlgPtr)
+              return;
+            if (vm == RandomStudyDialog::ViewMode::DVH) {
+              if (it % stride == 0 && plotted < maxCurves) {
+                ++plotted;
+                QColor col = QColor::fromHsv((it * 37) % 360, 200, 255);
+                col.setAlpha(70);
+                QMetaObject::invokeMethod(
+                    dlgPtr,
+                    [dlgPtr, x, y, col]() {
+                      if (dlgPtr)
+                        dlgPtr->addDVHCurve(x, y, col, true);
+                    },
+                    Qt::QueuedConnection);
+              }
+            }
+
+            // Histogram metric accumulation if needed
+            if (vm == RandomStudyDialog::ViewMode::Histogram) {
+              double metric = 0.0;
+              switch (ht) {
+              case RandomStudyDialog::HistType::DxCc: {
+                double targetVol =
+                    std::clamp(hparam, 0.0, doses.size() * voxelVolume);
+                double cum = 0.0;
+                double doseAt = 0.0;
+                for (int i = binCount - 1; i >= 0; --i) {
+                  cum += hist[i];
+                  if (cum >= targetVol) {
+                    doseAt = i * binSize;
+                    break;
+                  }
+                }
+                metric = doseAt;
+                break;
+              }
+              case RandomStudyDialog::HistType::DxPct: {
+                double pct = std::clamp(hparam, 0.0, 100.0);
+                double targetVol = totalVol * (pct / 100.0);
+                double cum = 0.0;
+                double doseAt = 0.0;
+                for (int i = binCount - 1; i >= 0; --i) {
+                  cum += hist[i];
+                  if (cum >= targetVol) {
+                    doseAt = i * binSize;
+                    break;
+                  }
+                }
+                metric = doseAt;
+                break;
+              }
+              case RandomStudyDialog::HistType::VdCc: {
+                int thBin =
+                    std::max(0, std::min(binCount - 1,
+                                         static_cast<int>(hparam / binSize)));
+                double volMm3 = 0.0;
+                for (int i = thBin; i < binCount; ++i)
+                  volMm3 += hist[i];
+                metric = volMm3 / 1000.0; // convert mm^3 to cc
+                break;
+              }
+              case RandomStudyDialog::HistType::MinDose: {
+                double md = std::numeric_limits<double>::infinity();
+                for (double d : doses)
+                  md = std::min(md, d);
+                if (!std::isfinite(md))
+                  md = 0.0;
+                metric = md;
+                break;
+              }
+              case RandomStudyDialog::HistType::MaxDose: {
+                double Md = 0.0;
+                for (double d : doses)
+                  Md = std::max(Md, d);
+                metric = Md;
+                break;
+              }
+              case RandomStudyDialog::HistType::MeanDose: {
+                double sum = 0.0;
+                for (double d : doses)
+                  sum += d;
+                metric = doses.empty()
+                             ? 0.0
+                             : (sum / static_cast<double>(doses.size()));
+                break;
+              }
+              }
+              metricVals.push_back(metric);
+              // Update histogram occasionally
+              if (it % stride == 0) {
+                updateHistogram(metricVals);
+              }
+            }
+            // progress
+            QMetaObject::invokeMethod(
+                dlgPtr,
+                [dlgPtr, it, nIter]() {
+                  if (dlgPtr)
+                    dlgPtr->setCalculationProgress(it + 1, nIter);
+                },
+                Qt::QueuedConnection);
+          }
+          // Final histogram update
+          if (vm == RandomStudyDialog::ViewMode::Histogram) {
+            updateHistogram(metricVals);
+          }
+          // Store cache into dialog for instant reuse across view switches
+          if (dlgPtr) {
+            const double totalVol =
+                static_cast<double>(roiPatientPoints.size()) * voxelVolume;
+            QMetaObject::invokeMethod(
+                dlgPtr,
+                [dlgPtr, cachedHists, binSize, totalVol]() {
+                  if (!dlgPtr)
+                    return;
+                  dlgPtr->setCachedHistograms(cachedHists, binSize, totalVol);
+                },
+                Qt::QueuedConnection);
+          }
+          // Re-enable controls when finished/cancelled
+          if (dlgPtr) {
+            QMetaObject::invokeMethod(
+                dlgPtr,
+                [dlgPtr]() {
+                  if (dlgPtr)
+                    dlgPtr->setRunning(false);
+                },
+                Qt::QueuedConnection);
+          }
+        };
+
+        auto future = QtConcurrent::run(worker);
+        Q_UNUSED(future);
+      });
+
+  dlg->show();
+  dlg->raise();
+  dlg->activateWindow();
+}
+
+void DicomViewer::onGammaAnalysisClicked() {
+  if (!m_gammaAnalysisWindow) {
+    m_gammaAnalysisWindow = new GammaAnalysisWindow(this);
+    m_gammaAnalysisWindow->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+  }
+
+  std::vector<GammaAnalysisWindow::DoseEntry> entries;
+  entries.reserve(m_doseItems.size());
+  for (const auto &item : m_doseItems) {
+    if (!item.widget)
+      continue;
+    GammaAnalysisWindow::DoseEntry entry;
+    entry.name = item.widget->name();
+    entry.dose = item.dose;
+    entry.dataFractions = item.widget->dataFractions();
+    entry.displayFractions = item.widget->displayFractions();
+    entry.factor = item.widget->factor();
+    entry.shift = computeAlignmentShift(item.dose) + item.widget->shift();
+    entries.push_back(entry);
+  }
+
+  if (entries.size() < 2) {
+    QMessageBox::warning(
+        this, tr("Gamma Analysis"),
+        tr("Please load at least two dose distributions."));
+  }
+
+  m_gammaAnalysisWindow->setDoseEntries(
+      entries, static_cast<int>(m_doseCalcMode), m_doseAlphaBeta);
+  m_gammaAnalysisWindow->show();
+  m_gammaAnalysisWindow->raise();
+  m_gammaAnalysisWindow->activateWindow();
+}
+
+double DicomViewer::transformDose(double rawDose, double dataFr,
+                                  double displayFr) const {
+  double d = rawDose / std::max(1.0, dataFr);
+  double physical = d * displayFr;
+  if (m_doseCalcMode == DoseCalcMode::Physical) {
+    return physical;
+  }
+  double bed = physical * (1.0 + d / m_doseAlphaBeta);
+  if (m_doseCalcMode == DoseCalcMode::BED) {
+    return bed;
+  }
+  return bed / (1.0 + 2.0 / m_doseAlphaBeta);
+}
+
+QVector3D DicomViewer::computeAlignmentShift(const RTDoseVolume &dose) const {
+  Q_UNUSED(dose);
+  // updateDoseAlignment() で確定したシフトをそのまま使用する
+  // （センター合わせ等のフォールバックを含む）
+  return m_doseShift;
+}
+
+void DicomViewer::updateColorBars() {
+  bool hasDoseData = m_doseLoaded && isVolumeLoaded();
+  bool hasDoseSources = !m_doseItems.empty();
+  if (!hasDoseData && !hasDoseSources) {
+    std::fill(std::begin(m_colorBarPersistentVisibility),
+              std::end(m_colorBarPersistentVisibility), false);
+  }
+
+  bool showColorBars = hasDoseData && m_doseVisible;
+  // Calculate default max regardless of visibility for proper dose range
+  double defaultMax = hasDoseData ? m_resampledDose.maxDose() * 1.1 : 0.0;
+
+  double minDose = 0.0;
+  double maxDose = defaultMax;
+
+  // Always read and use spinbox values if they exist
+  if (m_doseMinSpinBox && m_doseMaxSpinBox) {
+    // Initialize max spinbox with default if it's 0 and we have dose data
+    if (m_doseMaxSpinBox->value() == 0.0 && defaultMax > 0.0) {
+      QSignalBlocker blocker(m_doseMaxSpinBox);
+      m_doseMaxSpinBox->setValue(defaultMax);
+    }
+
+    // Always read spinbox values
+    minDose = m_doseMinSpinBox->value();
+    maxDose = m_doseMaxSpinBox->value();
+
+    // If max is still 0 or invalid, use default
+    if (maxDose <= 0.0 && defaultMax > 0.0) {
+      maxDose = defaultMax;
+    }
+
+    // Ensure max is greater than min
+    if (maxDose <= minDose) {
+      maxDose = minDose + 0.0001;
+    }
+  }
+
+  m_doseMinRange = minDose;
+  m_doseMaxRange = maxDose;
+
+  // Debug output
+  qDebug() << "updateColorBars: hasDoseData=" << hasDoseData
+           << "m_doseVisible=" << m_doseVisible
+           << "defaultMax=" << defaultMax
+           << "minDose=" << minDose
+           << "maxDose=" << maxDose;
+
+  int count = 1;
+  if (m_viewMode == ViewMode::Dual)
+    count = 2;
+  else if (m_viewMode == ViewMode::Quad)
+    count = 4;
+  else if (m_viewMode == ViewMode::Five)
+    count = VIEW_COUNT;
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    bool hideForFiveMode = (m_viewMode == ViewMode::Five && (i == 2 || i == 3));
+    if (!m_colorBars[i])
+      continue;
+
+    bool viewActive = (i < count) && !hideForFiveMode;
+    if (!viewActive) {
+      m_colorBars[i]->setVisible(false);
+      continue;
+    }
+
+    if (showColorBars) {
+      m_colorBars[i]->setDoseRange(minDose, maxDose);
+      m_colorBars[i]->setDisplayMode(m_doseDisplayMode);
+      m_colorBars[i]->setReferenceDose(m_doseReference);
+      m_colorBars[i]->setVisible(true);
+      m_colorBarPersistentVisibility[i] = true;
+    } else if (m_colorBarPersistentVisibility[i]) {
+      m_colorBars[i]->setVisible(true);
+    } else {
+      m_colorBars[i]->setVisible(false);
+    }
+  }
+}
+
+void DicomViewer::updateDoseShiftLabels() {
+  // Determine if any user-defined dose shift is set (non-zero)
+  bool hasUserShift = false;
+  const double eps = 1e-6;
+  for (const auto &it : m_doseItems) {
+    if (!it.widget)
+      continue;
+    QVector3D s = it.widget->shift();
+    if (std::fabs(s.x()) > eps || std::fabs(s.y()) > eps ||
+        std::fabs(s.z()) > eps) {
+      hasUserShift = true;
+      break;
+    }
+  }
+
+  // Determine if dose mode needs indicator
+  bool hasModeInfo =
+      m_doseCalcMode == DoseCalcMode::BED || m_doseCalcMode == DoseCalcMode::EqD2;
+
+  // Show only when dose overlay is relevant
+  bool shouldShow = (hasUserShift || hasModeInfo) && m_doseLoaded && m_doseVisible;
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (!m_doseShiftLabels[i])
+      continue;
+    // Show only on image views (Ax/Sag/Cor), not DVH/3D/Profile
+    bool isImageView = !(m_isDVHView[i] || m_is3DView[i] || m_isProfileView[i]);
+    if (shouldShow && isImageView && m_viewContainers[i]->isVisible()) {
+      QStringList parts;
+      if (hasUserShift)
+        parts << "Dose Shift";
+      if (hasModeInfo) {
+        QString modeStr =
+            (m_doseCalcMode == DoseCalcMode::BED) ? "BED" : "EqD2";
+        parts << QString("%1 α/β=%2").arg(modeStr).arg(m_doseAlphaBeta);
+      }
+      m_doseShiftLabels[i]->setText(parts.join(" "));
+      m_doseShiftLabels[i]->adjustSize();
+      m_doseShiftLabels[i]->show();
+    } else {
+      m_doseShiftLabels[i]->hide();
+    }
+  }
+
+  // Reposition after visibility change
+  updateSliderPosition();
+}
+
+void DicomViewer::resetDoseRange() {
+  const double rawMaxDose = m_resampledDose.maxDose();
+  const double maxDose = rawMaxDose * 1.1;
+  const double minDose = maxDose > 0.0 ? maxDose * 0.05 : 0.0;
+
+  if (m_doseMinSpinBox && m_doseMaxSpinBox) {
+    QSignalBlocker minBlocker(m_doseMinSpinBox);
+    QSignalBlocker maxBlocker(m_doseMaxSpinBox);
+    m_doseMinSpinBox->setValue(minDose);
+    m_doseMaxSpinBox->setValue(maxDose);
+  }
+  if (m_doseOpacitySlider) {
+    m_doseOpacitySlider->setValue(80);
+  }
+  m_doseMinRange = minDose;
+  m_doseMaxRange = maxDose;
+}
+
+// Colormap helper functions for dose display
+QColor DicomViewer::getDoseColor(double doseGy, double maxDoseGy) const {
+  if (maxDoseGy <= 0.0 || doseGy <= 0.0) {
+    return QColor(0, 0, 0, 0);
+  }
+
+  float doseRatio = static_cast<float>(doseGy / maxDoseGy);
+  QRgb rgb;
+
+  switch (m_doseDisplayMode) {
+    case DoseResampledVolume::DoseDisplayMode::Colorful:
+      rgb = mapDoseToColorHSV(doseRatio);
+      break;
+    case DoseResampledVolume::DoseDisplayMode::Isodose:
+      rgb = mapDoseToIsodose(doseRatio);
+      break;
+    case DoseResampledVolume::DoseDisplayMode::Hot:
+      rgb = mapDoseToHot(doseRatio);
+      break;
+    case DoseResampledVolume::DoseDisplayMode::Simple:
+      // Simple mode: use red color with intensity based on dose
+      {
+        int intensity = static_cast<int>(std::clamp(doseRatio * 255.0f, 0.0f, 255.0f));
+        rgb = qRgba(intensity, 0, 0, 255);
+      }
+      break;
+    default:
+      rgb = mapDoseToColorHSV(doseRatio);
+      break;
+  }
+
+  return QColor(qRed(rgb), qGreen(rgb), qBlue(rgb));
+}
+
+QRgb DicomViewer::mapDoseToColorHSV(float doseRatio) const {
+  if (doseRatio <= 0.0f) {
+    return qRgba(0, 0, 0, 0);
+  }
+
+  float hue = 0.0f;
+  float saturation = 1.0f;
+  float value = 1.0f;
+
+  if (doseRatio <= 0.2f) {
+    hue = 240.0f - (doseRatio / 0.2f) * 60.0f;
+    saturation = 0.8f + (doseRatio / 0.2f) * 0.2f;
+  } else if (doseRatio <= 0.4f) {
+    float t = (doseRatio - 0.2f) / 0.2f;
+    hue = 180.0f - t * 60.0f;
+    saturation = 1.0f;
+  } else if (doseRatio <= 0.6f) {
+    float t = (doseRatio - 0.4f) / 0.2f;
+    hue = 120.0f - t * 60.0f;
+    saturation = 1.0f;
+  } else if (doseRatio <= 0.8f) {
+    float t = (doseRatio - 0.6f) / 0.2f;
+    hue = 60.0f - t * 30.0f;
+    saturation = 1.0f;
+    value = 1.0f;
+  } else if (doseRatio <= 1.0f) {
+    float t = (doseRatio - 0.8f) / 0.2f;
+    hue = 30.0f - t * 30.0f;
+    saturation = 1.0f;
+    value = 1.0f;
+  } else {
+    float t = std::min(1.0f, (doseRatio - 1.0f) / 0.5f);
+    hue = 360.0f - t * 60.0f;
+    saturation = 1.0f;
+    value = 1.0f - t * 0.2f;
+  }
+
+  QColor color = QColor::fromHsvF(hue / 360.0f, saturation, value);
+  return qRgba(color.red(), color.green(), color.blue(), 255);
+}
+
+QRgb DicomViewer::mapDoseToIsodose(float doseRatio) const {
+  static const float isodoseLevels[] = {0.95f, 0.90f, 0.80f, 0.70f,
+                                        0.50f, 0.30f, 0.10f};
+
+  static const QRgb isodoseColors[] = {
+      qRgba(255, 0, 0, 255),   // 赤
+      qRgba(255, 128, 0, 255), // オレンジ
+      qRgba(255, 255, 0, 255), // 黄
+      qRgba(0, 255, 0, 255),   // 緑
+      qRgba(0, 255, 255, 255), // シアン
+      qRgba(0, 0, 255, 255),   // 青
+      qRgba(128, 0, 255, 255)  // 紫
+  };
+
+  for (int i = 0; i < 7; ++i) {
+    if (doseRatio >= isodoseLevels[i]) {
+      return isodoseColors[i];
+    }
+  }
+
+  return qRgba(0, 0, 0, 0);
+}
+
+QRgb DicomViewer::mapDoseToHot(float doseRatio) const {
+  doseRatio = std::clamp(doseRatio, 0.0f, 1.0f);
+  float r = std::min(1.0f, doseRatio * 3.0f);
+  float g = std::clamp((doseRatio - 0.33f) * 3.0f, 0.0f, 1.0f);
+  float b = std::clamp((doseRatio - 0.66f) * 3.0f, 0.0f, 1.0f);
+  return qRgba(static_cast<int>(r * 255), static_cast<int>(g * 255),
+               static_cast<int>(b * 255), 255);
+}
+
+void DicomViewer::onStructureVisibilityChanged(QListWidgetItem *item) {
+  if (!item) {
+    qWarning() << "onStructureVisibilityChanged: null item";
+    return;
+  }
+
+  // インデックスの安全な取得
+  int index = m_structureList->row(item);
+  qDebug() << QString("Structure visibility changed: index=%1, item=%2")
+                  .arg(index)
+                  .arg(item->text());
+
+  // インデックス範囲チェック
+  if (index < 0) {
+    qWarning() << QString("Invalid structure index: %1").arg(index);
+    return;
+  }
+
+  // ROI数と範囲の確認
+  int roiCount = m_rtstruct.roiCount();
+  if (index >= roiCount) {
+    qWarning() << QString("Structure index %1 out of range (max: %2)")
+                      .arg(index)
+                      .arg(roiCount - 1);
+    return;
+  }
+
+  // チェック状態の取得
+  bool visible = (item->checkState() == Qt::Checked);
+  qDebug() << QString("Setting ROI %1 (%2) visibility to %3")
+                  .arg(index)
+                  .arg(item->text())
+                  .arg(visible);
+
+  try {
+    // RTStructでの可視性設定（安全にチェック）
+    if (index < roiCount) {
+      m_rtstruct.setROIVisible(index, visible);
+    }
+
+    // 画像の更新（安全に実行）
+    updateImage();
+
+    qDebug() << QString("Structure visibility update completed for ROI %1")
+                    .arg(index);
+
+  } catch (const std::exception &e) {
+    qCritical() << QString("Error updating structure visibility for ROI %1: %2")
+                       .arg(index)
+                       .arg(e.what());
+  } catch (...) {
+    qCritical() << QString(
+                       "Unknown error updating structure visibility for ROI %1")
+                       .arg(index);
+  }
+}
+
+void DicomViewer::onShowAllStructures() {
+  qDebug() << "Showing all structures";
+
+  int listCount = m_structureList->count();
+  int roiCount = m_rtstruct.roiCount();
+
+  qDebug()
+      << QString("List items: %1, ROI count: %2").arg(listCount).arg(roiCount);
+
+  if (listCount == 0) {
+    qDebug() << "No structures in list";
+    return;
+  }
+
+  try {
+    // シグナルを無効化して循環参照を防ぐ
+    m_structureList->blockSignals(true);
+
+    // 安全な範囲でループ
+    int maxIndex = std::min(listCount, roiCount);
+    for (int i = 0; i < maxIndex; ++i) {
+      QListWidgetItem *item = m_structureList->item(i);
+      if (item) {
+        item->setCheckState(Qt::Checked);
+        qDebug()
+            << QString("Set item %1 (%2) to checked").arg(i).arg(item->text());
+      }
+
+      // RTStructの可視性を設定
+      if (i < roiCount) {
+        m_rtstruct.setROIVisible(i, true);
+      }
+    }
+
+    // シグナルを再有効化
+    m_structureList->blockSignals(false);
+
+    // 画像を更新
+    updateImage();
+
+    qDebug() << "Show all structures completed";
+
+  } catch (const std::exception &e) {
+    qCritical() << "Error in onShowAllStructures:" << e.what();
+    m_structureList->blockSignals(false); // エラー時も確実にシグナルを再有効化
+  } catch (...) {
+    qCritical() << "Unknown error in onShowAllStructures";
+    m_structureList->blockSignals(false);
+  }
+}
+
+void DicomViewer::onHideAllStructures() {
+  qDebug() << "Hiding all structures";
+
+  int listCount = m_structureList->count();
+  int roiCount = m_rtstruct.roiCount();
+
+  qDebug()
+      << QString("List items: %1, ROI count: %2").arg(listCount).arg(roiCount);
+
+  if (listCount == 0) {
+    qDebug() << "No structures in list";
+    return;
+  }
+
+  try {
+    // シグナルを無効化して循環参照を防ぐ
+    m_structureList->blockSignals(true);
+
+    // 安全な範囲でループ
+    int maxIndex = std::min(listCount, roiCount);
+    for (int i = 0; i < maxIndex; ++i) {
+      QListWidgetItem *item = m_structureList->item(i);
+      if (item) {
+        item->setCheckState(Qt::Unchecked);
+        qDebug() << QString("Set item %1 (%2) to unchecked")
+                        .arg(i)
+                        .arg(item->text());
+      }
+
+      // RTStructの可視性を設定
+      if (i < roiCount) {
+        m_rtstruct.setROIVisible(i, false);
+      }
+    }
+
+    // シグナルを再有効化
+    m_structureList->blockSignals(false);
+
+    // 画像を更新
+    updateImage();
+
+    qDebug() << "Hide all structures completed";
+
+  } catch (const std::exception &e) {
+    qCritical() << "Error in onHideAllStructures:" << e.what();
+    m_structureList->blockSignals(false); // エラー時も確実にシグナルを再有効化
+  } catch (...) {
+    qCritical() << "Unknown error in onHideAllStructures";
+    m_structureList->blockSignals(false);
+  }
+}
+
+void DicomViewer::onStructureLineWidthChanged(int value) {
+  m_structureLineWidth = value;
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_imageWidgets[i]) {
+      m_imageWidgets[i]->setStructureLineWidth(value);
+    }
+    if (m_3dWidgets[i]) {
+      m_3dWidgets[i]->setStructureLineWidth(value);
+    }
+  }
+  updateImage();
+}
+
+void DicomViewer::onStructurePointsToggled(bool checked) {
+  m_showStructurePoints = checked;
+  updateImage();
+}
+
+void DicomViewer::updateOrientationButtonTexts() {
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (!m_orientationButtons[i])
+      continue;
+
+    QString text;
+    if (m_isDVHView[i]) {
+      text = "DVH";
+    } else if (m_is3DView[i]) {
+      text = "3D";
+    } else if (m_isProfileView[i]) {
+      text = "Line";
+    } else {
+      switch (m_viewOrientations[i]) {
+      case DicomVolume::Orientation::Axial:
+        text = "Ax";
+        break;
+      case DicomVolume::Orientation::Sagittal:
+        text = "Sag";
+        break;
+      case DicomVolume::Orientation::Coronal:
+        text = "Cor";
+        break;
+      }
+    }
+    m_orientationButtons[i]->setText(text);
+    m_orientationButtons[i]->adjustSize();
+  }
+  updateSliderPosition();
+}
+
+// ★新規追加: 方向変更メニュー（全ビューで使用可能）
+void DicomViewer::showOrientationMenuForView(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT || !isVolumeLoaded())
+    return;
+
+  QMenu menu;
+  QAction *ax = menu.addAction("Axial");
+  QAction *sag = menu.addAction("Sagittal");
+  QAction *cor = menu.addAction("Coronal");
+  QAction *dvh = menu.addAction("DVH");
+  QAction *threeD = menu.addAction("3D");
+  QAction *profile = menu.addAction("Profile");
+
+  // 現在の方向にチェックマークを付ける
+  if (m_isDVHView[viewIndex]) {
+    dvh->setChecked(true);
+  } else if (m_is3DView[viewIndex]) {
+    threeD->setChecked(true);
+  } else if (m_isProfileView[viewIndex]) {
+    profile->setChecked(true);
+  } else {
+    switch (m_viewOrientations[viewIndex]) {
+    case DicomVolume::Orientation::Axial:
+      ax->setChecked(true);
+      break;
+    case DicomVolume::Orientation::Sagittal:
+      sag->setChecked(true);
+      break;
+    case DicomVolume::Orientation::Coronal:
+      cor->setChecked(true);
+      break;
+    }
+  }
+
+  QAction *sel = menu.exec(m_orientationButtons[viewIndex]->mapToGlobal(
+      QPoint(0, m_orientationButtons[viewIndex]->height())));
+  if (!sel)
+    return;
+
+  if (sel == dvh) {
+    if (!m_isDVHView[viewIndex]) {
+      m_isDVHView[viewIndex] = true;
+      m_is3DView[viewIndex] = false;
+      m_isProfileView[viewIndex] = false;
+      m_viewStacks[viewIndex]->setCurrentWidget(m_dvhWidgets[viewIndex]);
+      if (!m_dvhData.empty()) {
+        m_dvhWidgets[viewIndex]->setDVHData(m_dvhData);
+        m_dvhWidgets[viewIndex]->setPatientInfo(patientInfoText());
+      }
+      m_sliceIndexLabels[viewIndex]->hide();
+      if (m_infoOverlays[viewIndex])
+        m_infoOverlays[viewIndex]->hide();
+      if (m_coordLabels[viewIndex])
+        m_coordLabels[viewIndex]->hide();
+      if (m_cursorDoseLabels[viewIndex])
+        m_cursorDoseLabels[viewIndex]->hide();
+      m_imageWidgets[viewIndex]->clearCursorCross();
+      updateOrientationButtonTexts();
+      updateSliderPosition();
+      updateImage();
+      updateInteractionButtonVisibility(viewIndex);
+    }
+    return;
+  }
+
+  if (sel == threeD) {
+    if (!m_is3DView[viewIndex]) {
+      m_is3DView[viewIndex] = true;
+      m_isDVHView[viewIndex] = false;
+      m_isProfileView[viewIndex] = false;
+      m_viewStacks[viewIndex]->setCurrentWidget(m_3dWidgets[viewIndex]);
+      m_sliceIndexLabels[viewIndex]->hide();
+      if (m_infoOverlays[viewIndex])
+        m_infoOverlays[viewIndex]->hide();
+      if (m_coordLabels[viewIndex])
+        m_coordLabels[viewIndex]->hide();
+      if (m_cursorDoseLabels[viewIndex])
+        m_cursorDoseLabels[viewIndex]->hide();
+      m_imageWidgets[viewIndex]->clearCursorCross();
+      updateOrientationButtonTexts();
+      updateSliderPosition();
+      // update 3D view
+      update3DView(viewIndex);
+      updateInteractionButtonVisibility(viewIndex);
+    }
+    return;
+  }
+
+  if (sel == profile) {
+    if (!m_isProfileView[viewIndex]) {
+      m_isProfileView[viewIndex] = true;
+      m_isDVHView[viewIndex] = false;
+      m_is3DView[viewIndex] = false;
+      m_viewStacks[viewIndex]->setCurrentWidget(m_profileWidgets[viewIndex]);
+      m_sliceIndexLabels[viewIndex]->hide();
+      if (m_infoOverlays[viewIndex])
+        m_infoOverlays[viewIndex]->hide();
+      if (m_coordLabels[viewIndex])
+        m_coordLabels[viewIndex]->hide();
+      if (m_cursorDoseLabels[viewIndex])
+        m_cursorDoseLabels[viewIndex]->hide();
+      m_imageWidgets[viewIndex]->clearCursorCross();
+      updateOrientationButtonTexts();
+      updateSliderPosition();
+      updateInteractionButtonVisibility(viewIndex);
+    }
+    return;
+  }
+
+  if (m_isDVHView[viewIndex] || m_is3DView[viewIndex] ||
+      m_isProfileView[viewIndex]) {
+    m_isDVHView[viewIndex] = false;
+    m_is3DView[viewIndex] = false;
+    m_isProfileView[viewIndex] = false;
+    m_viewStacks[viewIndex]->setCurrentWidget(m_imagePanels[viewIndex]);
+    if (m_infoOverlays[viewIndex])
+      m_infoOverlays[viewIndex]->show();
+    if (m_coordLabels[viewIndex])
+      m_coordLabels[viewIndex]->show();
+    if (m_cursorDoseLabels[viewIndex])
+      m_cursorDoseLabels[viewIndex]->hide();
+    m_imageWidgets[viewIndex]->clearCursorCross();
+    updateSliderPosition();
+    updateInteractionButtonVisibility(viewIndex);
+  }
+
+  DicomVolume::Orientation newOri;
+  if (sel == ax)
+    newOri = DicomVolume::Orientation::Axial;
+  else if (sel == sag)
+    newOri = DicomVolume::Orientation::Sagittal;
+  else if (sel == cor)
+    newOri = DicomVolume::Orientation::Coronal;
+  else
+    return;
+
+  if (newOri == m_viewOrientations[viewIndex]) {
+    updateOrientationButtonTexts();
+    return; // 変更なし
+  }
+
+  m_viewOrientations[viewIndex] = newOri;
+
+  int count = sliceCountForOrientation(m_viewOrientations[viewIndex]);
+  m_sliceSliders[viewIndex]->setRange(0, count > 0 ? count - 1 : 0);
+  int mid = count > 0 ? count / 2 : 0;
+  m_currentIndices[viewIndex] = mid;
+  m_sliceSliders[viewIndex]->setValue(mid);
+  loadVolumeSlice(viewIndex, mid);
+  updateSliceLabels();
+  updateOrientationButtonTexts();
+}
+
+void DicomViewer::updateImageSeriesButtons() {
+  const int seriesCount = m_imageSeriesDirs.size();
+  int activeIndex = m_activeImageSeriesIndex;
+  if (seriesCount <= 0) {
+    activeIndex = 0;
+  } else {
+    activeIndex = std::clamp(activeIndex, 0, seriesCount - 1);
+  }
+
+  QString label = tr("Image%1").arg(activeIndex + 1);
+  QString modality;
+  if (activeIndex >= 0 && activeIndex < m_imageSeriesModalities.size())
+    modality = m_imageSeriesModalities.at(activeIndex);
+  QString tooltip = modality.isEmpty() ? label
+                                       : QStringLiteral("%1 (%2)").arg(label, modality);
+
+  bool hasImages = isVolumeLoaded() || !m_dicomFiles.isEmpty();
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (!m_imageSeriesButtons[i])
+      continue;
+    if (m_fusionViewActive && i == 1) {
+      m_imageSeriesButtons[i]->setVisible(true);
+      m_imageSeriesButtons[i]->setEnabled(false);
+      m_imageSeriesButtons[i]->setText(tr("Image2"));
+      m_imageSeriesButtons[i]->setToolTip(tr("Fusionビュー (CT+MRI)"));
+      m_imageSeriesButtons[i]->adjustSize();
+      continue;
+    }
+    m_imageSeriesButtons[i]->setEnabled(true);
+    bool visible = hasImages && seriesCount > 1;
+    m_imageSeriesButtons[i]->setVisible(visible);
+    m_imageSeriesButtons[i]->setText(label);
+    m_imageSeriesButtons[i]->setToolTip(visible ? tooltip : QString());
+    m_imageSeriesButtons[i]->adjustSize();
+  }
+}
+
+void DicomViewer::showImageSeriesMenu(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  if (m_imageSeriesDirs.size() <= 1)
+    return;
+
+  QMenu menu;
+  for (int i = 0; i < m_imageSeriesDirs.size(); ++i) {
+    QString label = tr("Image%1").arg(i + 1);
+    QString modality;
+    if (i >= 0 && i < m_imageSeriesModalities.size())
+      modality = m_imageSeriesModalities.at(i);
+    QString text = modality.isEmpty()
+                        ? label
+                        : QStringLiteral("%1 (%2)").arg(label, modality);
+    QAction *action = menu.addAction(text);
+    action->setData(i);
+    if (i == m_activeImageSeriesIndex) {
+      QFont f = action->font();
+      f.setBold(true);
+      action->setFont(f);
+    }
+  }
+
+  QAction *sel = menu.exec(m_imageSeriesButtons[viewIndex]->mapToGlobal(
+      QPoint(0, m_imageSeriesButtons[viewIndex]->height())));
+  if (!sel)
+    return;
+
+  bool ok = false;
+  int index = sel->data().toInt(&ok);
+  if (!ok)
+    return;
+  switchToImageSeries(index);
+}
+
+bool DicomViewer::switchToImageSeries(int index) {
+  if (index < 0 || index >= m_imageSeriesDirs.size())
+    return false;
+  if (index == m_activeImageSeriesIndex)
+    return true;
+  if (m_activeImageSeriesIndex >= 0 &&
+      m_activeImageSeriesIndex <
+          static_cast<int>(m_seriesVolumeCache.size()) &&
+      isVolumeLoaded()) {
+    m_seriesVolumeCache[m_activeImageSeriesIndex].volume = m_volume;
+    m_seriesVolumeCache[m_activeImageSeriesIndex].prepared = true;
+  }
+
+  if (!ensureImageSeriesVolume(index))
+    return false;
+
+  if (index < 0 || index >= static_cast<int>(m_seriesVolumeCache.size()))
+    return false;
+
+  m_volume = m_seriesVolumeCache[index].volume;
+  invalidateStructureSurfaceCache();
+  m_activeImageSeriesIndex = index;
+
+  double window = m_seriesWindowValues.value(
+      index, m_windowSlider ? m_windowSlider->value() : 256.0);
+  double level = m_seriesLevelValues.value(
+      index, m_levelSlider ? m_levelSlider->value() : 128.0);
+  setWindowLevel(window, level);
+
+  if (index >= 0 && index < m_imageSeriesDirs.size()) {
+    QFileInfo info(m_imageSeriesDirs.at(index));
+    m_ctFilename = info.fileName();
+  }
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_isDVHView[i] || m_is3DView[i] || m_isProfileView[i])
+      continue;
+    int count = sliceCountForOrientation(m_viewOrientations[i]);
+    if (count <= 0) {
+      m_sliceSliders[i]->blockSignals(true);
+      m_sliceSliders[i]->setRange(0, 0);
+      m_sliceSliders[i]->setValue(0);
+      m_sliceSliders[i]->setEnabled(false);
+      m_sliceSliders[i]->blockSignals(false);
+      continue;
+    }
+    int clamped = std::clamp(m_currentIndices[i], 0, count - 1);
+    m_sliceSliders[i]->blockSignals(true);
+    m_sliceSliders[i]->setRange(0, count - 1);
+    m_sliceSliders[i]->setValue(clamped);
+    m_sliceSliders[i]->setEnabled(true);
+    m_sliceSliders[i]->blockSignals(false);
+    loadVolumeSlice(i, clamped);
+  }
+
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_is3DView[i])
+      update3DView(i);
+  }
+
+  updateSliceLabels();
+  updateImageInfo();
+  updateInfoOverlays();
+  updateImageSeriesButtons();
+  updateColorBars();
+  updateDoseShiftLabels();
+  updateSliderPosition();
+
+  return true;
+}
+
+void DicomViewer::initializeSeriesWindowLevel(int index,
+                                              const QString &directory) {
+  if (index < 0 || index >= m_seriesWindowLevelInitialized.size())
+    return;
+  if (m_seriesWindowLevelInitialized[index])
+    return;
+
+  double window = m_seriesWindowValues.value(index, 256.0);
+  double level = m_seriesLevelValues.value(index, 128.0);
+
+  if (!directory.isEmpty()) {
+    QDir seriesDir(directory);
+    QFileInfoList dicomFiles =
+        seriesDir.entryInfoList(QDir::Files, QDir::Name | QDir::IgnoreCase);
+    DicomReader reader;
+    for (const QFileInfo &fi : dicomFiles) {
+      if (reader.loadDicomFile(fi.absoluteFilePath())) {
+        reader.getWindowLevel(window, level);
+        break;
+      }
+    }
+  }
+
+  if (index >= 0 && index < m_seriesWindowValues.size())
+    m_seriesWindowValues[index] = window;
+  if (index >= 0 && index < m_seriesLevelValues.size())
+    m_seriesLevelValues[index] = level;
+  m_seriesWindowLevelInitialized[index] = true;
+}
+
+bool DicomViewer::ensureImageSeriesVolume(int index) {
+  if (m_imageSeriesDirs.isEmpty())
+    return false;
+  if (index < 0 || index >= m_imageSeriesDirs.size())
+    return false;
+
+  if (m_seriesVolumeCache.size() != m_imageSeriesDirs.size())
+    m_seriesVolumeCache.resize(m_imageSeriesDirs.size());
+
+  if (m_primaryImageSeriesIndex < 0 ||
+      m_primaryImageSeriesIndex >=
+          static_cast<int>(m_seriesVolumeCache.size())) {
+    if (!m_seriesVolumeCache.empty())
+      m_primaryImageSeriesIndex = 0;
+  }
+
+  ImageSeriesCacheEntry &entry = m_seriesVolumeCache[index];
+  if (entry.prepared)
+    return true;
+
+  if (index == m_activeImageSeriesIndex && isVolumeLoaded()) {
+    entry.volume = m_volume;
+    entry.prepared = true;
+    return true;
+  }
+
+  const QString dir = m_imageSeriesDirs.value(index);
+  if (dir.isEmpty())
+    return false;
+
+  DicomVolume loadedVolume;
+  bool loadedFromFusion = false;
+  FusionSeriesMetadata meta;
+  if (!loadedVolume.loadFromDirectory(dir)) {
+    if (!loadFusionVolumeFromDirectory(dir, loadedVolume, &meta))
+      return false;
+    loadedFromFusion = true;
+  }
+
+  if (loadedFromFusion) {
+    if (index >= 0 && index < m_seriesWindowValues.size() &&
+        std::isfinite(meta.window))
+      m_seriesWindowValues[index] = meta.window;
+    if (index >= 0 && index < m_seriesLevelValues.size() &&
+        std::isfinite(meta.level))
+      m_seriesLevelValues[index] = meta.level;
+    if (index >= 0 && index < m_seriesWindowLevelInitialized.size())
+      m_seriesWindowLevelInitialized[index] = true;
+  } else {
+    initializeSeriesWindowLevel(index, dir);
+  }
+
+  if (index == m_primaryImageSeriesIndex || m_imageSeriesDirs.size() <= 1) {
+    entry.volume = std::move(loadedVolume);
+    entry.prepared = true;
+    return true;
+  }
+
+  if (m_primaryImageSeriesIndex < 0 ||
+      m_primaryImageSeriesIndex >= static_cast<int>(m_seriesVolumeCache.size()))
+    return false;
+
+  if (loadedFromFusion) {
+    entry.volume = std::move(loadedVolume);
+    entry.prepared = true;
+    return true;
+  }
+
+  if (!ensureImageSeriesVolume(m_primaryImageSeriesIndex))
+    return false;
+
+  const ImageSeriesCacheEntry &referenceEntry =
+      m_seriesVolumeCache[m_primaryImageSeriesIndex];
+  if (!referenceEntry.prepared)
+    return false;
+
+  const int sliceCount = referenceEntry.volume.depth();
+  std::unique_ptr<QProgressDialog> progressDialog;
+  if (sliceCount > 0) {
+    auto dialog = std::make_unique<QProgressDialog>(
+        tr("Image%1 を座標合わせ中...").arg(index + 1), QString(), 0,
+        sliceCount, this);
+    dialog->setWindowModality(Qt::ApplicationModal);
+    dialog->setCancelButton(nullptr);
+    dialog->setMinimumDuration(0);
+    dialog->setValue(0);
+    progressDialog = std::move(dialog);
+  }
+  QProgressDialog *progressPtr = progressDialog.get();
+  std::function<void(int, int)> progressCallback;
+  if (progressPtr) {
+    progressCallback = [progressPtr](int done, int total) {
+      QMetaObject::invokeMethod(
+          progressPtr,
+          [progressPtr, done, total]() {
+            if (!progressPtr)
+              return;
+            if (progressPtr->maximum() != total)
+              progressPtr->setMaximum(total);
+            progressPtr->setValue(done);
+          },
+          Qt::QueuedConnection);
+    };
+  }
+
+  cv::Mat resampled = resampleVolumeToReference(referenceEntry.volume,
+                                                loadedVolume, progressCallback);
+  if (progressPtr) {
+    progressPtr->setValue(progressPtr->maximum());
+    progressPtr->close();
+    QCoreApplication::processEvents();
+  }
+  if (resampled.empty())
+    return false;
+
+  DicomVolume prepared;
+  if (!prepared.createFromReference(referenceEntry.volume, resampled))
+    return false;
+
+  entry.volume = std::move(prepared);
+  entry.prepared = true;
+  return true;
+}
+
+void DicomViewer::setViewToImage(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  m_isDVHView[viewIndex] = false;
+  m_is3DView[viewIndex] = false;
+  m_isProfileView[viewIndex] = false;
+  m_viewStacks[viewIndex]->setCurrentWidget(m_imagePanels[viewIndex]);
+  if (m_sliceIndexLabels[viewIndex])
+    m_sliceIndexLabels[viewIndex]->show();
+  if (m_infoOverlays[viewIndex])
+    m_infoOverlays[viewIndex]->show();
+  if (m_coordLabels[viewIndex])
+    m_coordLabels[viewIndex]->show();
+  if (m_cursorDoseLabels[viewIndex])
+    m_cursorDoseLabels[viewIndex]->hide();
+  m_imageWidgets[viewIndex]->clearCursorCross();
+  updateDoseShiftLabels();
+  updateInteractionButtonVisibility(viewIndex);
+}
+
+void DicomViewer::setViewTo3D(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  m_is3DView[viewIndex] = true;
+  m_isDVHView[viewIndex] = false;
+  m_isProfileView[viewIndex] = false;
+  m_viewStacks[viewIndex]->setCurrentWidget(m_3dWidgets[viewIndex]);
+  if (m_sliceIndexLabels[viewIndex])
+    m_sliceIndexLabels[viewIndex]->hide();
+  if (m_infoOverlays[viewIndex])
+    m_infoOverlays[viewIndex]->hide();
+  if (m_coordLabels[viewIndex])
+    m_coordLabels[viewIndex]->hide();
+  if (m_cursorDoseLabels[viewIndex])
+    m_cursorDoseLabels[viewIndex]->hide();
+  m_imageWidgets[viewIndex]->clearCursorCross();
+  // ボリューム未ロード時に空データを渡さない
+  if (isVolumeLoaded()) {
+    update3DView(viewIndex);
+  }
+  // Set initial visibility state for images and lines in 3D view
+  if (m_3dWidgets[viewIndex]) {
+    m_3dWidgets[viewIndex]->setShowImages(m_show3DImages[viewIndex]);
+    m_3dWidgets[viewIndex]->setShowLines(m_show3DLines[viewIndex]);
+    m_3dWidgets[viewIndex]->setShowSurfaces(m_show3DSurfaces[viewIndex]);
+  }
+  updateDoseShiftLabels();
+  updateInteractionButtonVisibility(viewIndex);
+}
+
+void DicomViewer::setViewToDVH(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  m_isDVHView[viewIndex] = true;
+  m_is3DView[viewIndex] = false;
+  m_isProfileView[viewIndex] = false;
+  m_viewStacks[viewIndex]->setCurrentWidget(m_dvhWidgets[viewIndex]);
+  if (!m_dvhData.empty()) {
+    m_dvhWidgets[viewIndex]->setDVHData(m_dvhData);
+    m_dvhWidgets[viewIndex]->setPatientInfo(patientInfoText());
+    m_dvhWidgets[viewIndex]->setPrescriptionDose(m_doseReference);
+  }
+  if (m_sliceIndexLabels[viewIndex])
+    m_sliceIndexLabels[viewIndex]->hide();
+  if (m_infoOverlays[viewIndex])
+    m_infoOverlays[viewIndex]->hide();
+  if (m_coordLabels[viewIndex])
+    m_coordLabels[viewIndex]->hide();
+  if (m_cursorDoseLabels[viewIndex])
+    m_cursorDoseLabels[viewIndex]->hide();
+  m_imageWidgets[viewIndex]->clearCursorCross();
+  updateDoseShiftLabels();
+  updateInteractionButtonVisibility(viewIndex);
+}
+
+void DicomViewer::setViewToProfile(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  m_isProfileView[viewIndex] = true;
+  m_isDVHView[viewIndex] = false;
+  m_is3DView[viewIndex] = false;
+  m_viewStacks[viewIndex]->setCurrentWidget(m_profileWidgets[viewIndex]);
+  if (m_sliceIndexLabels[viewIndex])
+    m_sliceIndexLabels[viewIndex]->hide();
+  if (m_infoOverlays[viewIndex])
+    m_infoOverlays[viewIndex]->hide();
+  if (m_coordLabels[viewIndex])
+    m_coordLabels[viewIndex]->hide();
+  if (m_cursorDoseLabels[viewIndex])
+    m_cursorDoseLabels[viewIndex]->hide();
+  m_imageWidgets[viewIndex]->clearCursorCross();
+  updateDoseShiftLabels();
+  updateInteractionButtonVisibility(viewIndex);
+}
+
+bool DicomViewer::switchViewContentFromString(int viewIndex,
+                                              const QString &mode) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return false;
+  if (!isViewIndexVisible(viewIndex))
+    return false;
+  const QString key = mode.trimmed().toLower();
+  if (key.isEmpty())
+    return false;
+
+  auto finalizeUpdates = [this]() {
+    updateOrientationButtonTexts();
+    updateSliceLabels();
+    updateSliderPosition();
+    updateImage();
+    updateColorBars();
+  };
+
+  if (key == QStringLiteral("dvh")) {
+    setViewToDVH(viewIndex);
+    finalizeUpdates();
+    return true;
+  }
+  if (key == QStringLiteral("3d") || key == QStringLiteral("volume")) {
+    setViewTo3D(viewIndex);
+    finalizeUpdates();
+    return true;
+  }
+  if (key == QStringLiteral("profile") || key == QStringLiteral("dpsd")) {
+    setViewToProfile(viewIndex);
+    finalizeUpdates();
+    return true;
+  }
+
+  if (m_isDVHView[viewIndex] || m_is3DView[viewIndex] ||
+      m_isProfileView[viewIndex]) {
+    setViewToImage(viewIndex);
+  }
+
+  DicomVolume::Orientation desired = m_viewOrientations[viewIndex];
+  if (key == QStringLiteral("axial") || key == QStringLiteral("ax")) {
+    desired = DicomVolume::Orientation::Axial;
+  } else if (key == QStringLiteral("sagittal") || key == QStringLiteral("sag")) {
+    desired = DicomVolume::Orientation::Sagittal;
+  } else if (key == QStringLiteral("coronal") || key == QStringLiteral("cor")) {
+    desired = DicomVolume::Orientation::Coronal;
+  } else {
+    return false;
+  }
+
+  if (m_viewOrientations[viewIndex] != desired) {
+    m_viewOrientations[viewIndex] = desired;
+    int count = sliceCountForOrientation(desired);
+    m_sliceSliders[viewIndex]->setRange(0, count > 0 ? count - 1 : 0);
+    int mid = count > 0 ? count / 2 : 0;
+    m_currentIndices[viewIndex] = mid;
+    m_sliceSliders[viewIndex]->setValue(mid);
+    loadVolumeSlice(viewIndex, mid);
+  } else {
+    loadVolumeSlice(viewIndex, m_currentIndices[viewIndex]);
+  }
+
+  finalizeUpdates();
+  return true;
+}
+
+int DicomViewer::visibleViewCount() const {
+  switch (m_viewMode) {
+  case ViewMode::Single:
+    return 1;
+  case ViewMode::Dual:
+    return 2;
+  case ViewMode::Quad:
+    return 4;
+  case ViewMode::Five:
+  default:
+    return VIEW_COUNT;
+  }
+}
+
+bool DicomViewer::isViewIndexVisible(int index) const {
+  return index >= 0 && index < visibleViewCount();
+}
+
+int DicomViewer::clampToVisibleViewIndex(int index) const {
+  const int count = visibleViewCount();
+  if (count <= 0)
+    return 0;
+  return std::clamp(index, 0, count - 1);
+}
+
+int DicomViewer::findVisibleDvhView() const {
+  const int count = visibleViewCount();
+  for (int i = 0; i < count; ++i) {
+    if (m_isDVHView[i])
+      return i;
+  }
+  return -1;
+}
+
+int DicomViewer::activeOrDefaultViewIndex(int fallback) const {
+  if (isViewIndexVisible(m_activeViewIndex))
+    return m_activeViewIndex;
+  int candidate = fallback;
+  if (!isViewIndexVisible(candidate))
+    candidate = clampToVisibleViewIndex(candidate);
+  if (!isViewIndexVisible(candidate))
+    candidate = 0;
+  return candidate;
+}
+
+void DicomViewer::updateSyncedScale() {
+  if (!m_syncScale)
+    return;
+
+  // アクティブビューのズーム係数を他のビューに適用
+  syncZoomToAllViews(m_zoomFactor);
+}
+
+void DicomViewer::syncZoomToAllViews(double zoomFactor) {
+  if (!m_syncScale)
+    return;
+
+  int count = 1;
+  if (m_viewMode == ViewMode::Dual)
+    count = 2;
+  else if (m_viewMode == ViewMode::Quad)
+    count = 4;
+  else if (m_viewMode == ViewMode::Five)
+    count = VIEW_COUNT;
+
+  for (int i = 0; i < count; ++i) {
+    if (m_is3DView[i])
+      m_3dWidgets[i]->setZoom(qMin(zoomFactor * ZOOM_3D_RATIO, MAX_ZOOM_3D));
+    else
+      m_imageWidgets[i]->setZoom(qMin(zoomFactor, MAX_ZOOM));
+  }
+}
+
+void DicomViewer::onShowDVH() {
+  qDebug() << "=== DVH Show Request ===";
+
+  int index = m_activeViewIndex;
+  qDebug() << QString("Active view index: %1").arg(index);
+
+  if (!isViewIndexVisible(index)) {
+    int fallback = findVisibleDvhView();
+    if (fallback < 0)
+      fallback = clampToVisibleViewIndex(0);
+    if (!isViewIndexVisible(fallback)) {
+      qDebug() << "No visible view available for DVH";
+      return;
+    }
+    index = fallback;
+    m_activeViewIndex = index;
+    qDebug() << QString("Adjusted DVH view index to %1 due to layout")
+                    .arg(index);
+  }
+
+  if (index < 0 || index >= VIEW_COUNT) {
+    qDebug() << "Invalid view index";
+    return;
+  }
+
+  // DVHデータが空の場合でもここでは計算せず、
+  // チェックボックス操作時に計算を行う
+  if (m_dvhData.empty()) {
+    qDebug() << "DVH data will be calculated when a ROI is selected";
+  }
+
+  // DVHビューに切り替え
+  qDebug() << QString("Switching view %1 to DVH mode").arg(index);
+
+  m_isDVHView[index] = true;
+  m_viewStacks[index]->setCurrentWidget(m_dvhWidgets[index]);
+
+  // UI要素を非表示
+  if (m_sliceIndexLabels[index])
+    m_sliceIndexLabels[index]->hide();
+  if (m_infoOverlays[index])
+    m_infoOverlays[index]->hide();
+  if (m_coordLabels[index])
+    m_coordLabels[index]->hide();
+  if (m_cursorDoseLabels[index])
+    m_cursorDoseLabels[index]->hide();
+  m_imageWidgets[index]->clearCursorCross();
+
+  // DVHデータを設定
+  qDebug() << QString("Setting DVH data to widget %1 (%2 ROIs)")
+                  .arg(index)
+                  .arg(m_dvhData.size());
+  m_dvhWidgets[index]->setDVHData(m_dvhData);
+  m_dvhWidgets[index]->setPatientInfo(patientInfoText());
+  m_dvhWidgets[index]->setPrescriptionDose(m_doseReference);
+
+  // ボタンテキストを更新
+  updateOrientationButtonTexts();
+  updateSliderPosition();
+  updateImage();
+
+  qDebug() << QString("DVH view %1 setup complete").arg(index);
+}
+
+void DicomViewer::onDvhCalculationRequested(const QString &roiName) {
+  qDebug() << "=== DVH single ROI calculation ===";
+  if (!isVolumeLoaded() || !m_doseLoaded || !m_rtstructLoaded ||
+      !m_resampledDose.isResampled()) {
+    QMessageBox::warning(this, tr("DVH"),
+                         tr("DVH計算に必要なデータが不足しています"));
+    return;
+  }
+
+  int roiIndex = -1;
+  for (int i = 0; i < m_rtstruct.roiCount(); ++i) {
+    if (m_rtstruct.roiName(i) == roiName) {
+      roiIndex = i;
+      break;
+    }
+  }
+  if (roiIndex < 0) {
+    qWarning() << "ROI not found:" << roiName;
+    return;
+  }
+
+  if (m_dvhData.size() < static_cast<size_t>(m_rtstruct.roiCount()))
+    m_dvhData.resize(m_rtstruct.roiCount());
+
+  // 既に計算済みなら可視化のみ更新
+  if (!m_dvhData[roiIndex].points.empty()) {
+    m_dvhData[roiIndex].isVisible = true;
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      if (m_dvhWidgets[i]) {
+        m_dvhWidgets[i]->setDVHData(m_dvhData);
+        m_dvhWidgets[i]->setPatientInfo(patientInfoText());
+        m_dvhWidgets[i]->setPrescriptionDose(m_doseReference);
+      }
+    }
+    return;
+  }
+
+  if (m_dvhWatchers.contains(roiIndex)) {
+    qDebug() << "DVH calculation already in progress for" << roiName;
+    return;
+  }
+
+  // ROIのサイズ推定と確認ダイアログ
+  QVector3D bbMin, bbMax;
+  int voxelEstimate = 0;
+  if (m_rtstruct.roiBoundingBox(roiIndex, bbMin, bbMax)) {
+    voxelEstimate = DVHCalculator::estimateVoxelCount(m_volume, bbMin, bbMax);
+  }
+  const int LARGE_ROI_THRESHOLD = 2000000; // おおよその目安
+  if (voxelEstimate > LARGE_ROI_THRESHOLD) {
+    QMessageBox::StandardButton res = QMessageBox::question(
+        this, tr("DVH"),
+        tr("ROI '%1' の計算には時間がかかる可能性があります (推定 %2 "
+           "ボクセル)。\n計算を続行しますか?")
+            .arg(roiName)
+            .arg(voxelEstimate),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (res != QMessageBox::Yes) {
+      for (int i = 0; i < VIEW_COUNT; ++i) {
+        if (m_dvhWidgets[i])
+          m_dvhWidgets[i]->setROIChecked(roiName, false);
+      }
+      return;
+    }
+  }
+
+  double binSize = m_resampledDose.maxDose() / 200.0;
+  auto watcher = new QFutureWatcher<DVHCalculator::DVHData>(this);
+  m_dvhWatchers.insert(roiIndex, watcher);
+
+  auto progressCallback = [this](int processed, int total) {
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+      if (m_dvhWidgets[i]) {
+        DVHWindow *w = m_dvhWidgets[i];
+        QMetaObject::invokeMethod(
+            w,
+            [w, processed, total]() {
+              w->setCalculationProgress(processed, total);
+            },
+            Qt::QueuedConnection);
+      }
+    }
+  };
+
+  connect(watcher, &QFutureWatcher<DVHCalculator::DVHData>::finished, this,
+          [this, watcher, roiIndex]() {
+            watcher->deleteLater();
+            auto data = watcher->result();
+            data.isVisible = true;
+            m_dvhData[roiIndex] = std::move(data);
+            m_dvhWatchers.remove(roiIndex);
+            for (int i = 0; i < VIEW_COUNT; ++i) {
+              if (m_dvhWidgets[i]) {
+                m_dvhWidgets[i]->setDVHData(m_dvhData);
+                m_dvhWidgets[i]->setPatientInfo(patientInfoText());
+                m_dvhWidgets[i]->setPrescriptionDose(m_doseReference);
+                m_dvhWidgets[i]->setCalculationProgress(0, 0);
+              }
+            }
+          });
+
+  QFuture<DVHCalculator::DVHData> future =
+      QtConcurrent::run([this, roiIndex, binSize, progressCallback]() {
+        return DVHCalculator::calculateSingleROI(m_volume, m_resampledDose,
+                                                 m_rtstruct, roiIndex, binSize,
+                                                 nullptr, progressCallback);
+      });
+  watcher->setFuture(future);
+}
+
+// CalcMax（Gy）変更: 現在計算済みの全ROIを再計算（201 bins）
+void DicomViewer::onDvhCalcMaxChanged(double calcMaxGy) {
+  if (!isVolumeLoaded() || !m_doseLoaded || !m_rtstructLoaded ||
+      !m_resampledDose.isResampled()) {
+    return;
+  }
+
+  // Auto mode: use resampled dose max as cap
+  double capGy =
+      (calcMaxGy > 0.0) ? calcMaxGy : std::max(1e-6, m_resampledDose.maxDose());
+  double binSize = capGy / 200.0; // 201 bins (0..200)
+
+  // スレッドで各ROIを再計算（既にデータがあるもののみ）
+  for (int r = 0; r < m_rtstruct.roiCount(); ++r) {
+    if (r < 0 || static_cast<size_t>(r) >= m_dvhData.size())
+      continue;
+    if (m_dvhData[r].points.empty())
+      continue; // 未計算はスキップ
+    if (m_dvhWatchers.contains(r))
+      continue; // 進行中はスキップ
+
+    auto watcher = new QFutureWatcher<DVHCalculator::DVHData>(this);
+    m_dvhWatchers.insert(r, watcher);
+
+    connect(watcher, &QFutureWatcher<DVHCalculator::DVHData>::finished, this,
+            [this, watcher, r]() {
+              watcher->deleteLater();
+              auto data = watcher->result();
+              // 既存の可視性を維持
+              data.isVisible = m_dvhData[r].isVisible;
+              m_dvhData[r] = std::move(data);
+              m_dvhWatchers.remove(r);
+              for (int i = 0; i < VIEW_COUNT; ++i) {
+                if (m_dvhWidgets[i]) {
+                  m_dvhWidgets[i]->setDVHData(m_dvhData);
+                  m_dvhWidgets[i]->setPatientInfo(patientInfoText());
+                  m_dvhWidgets[i]->setPrescriptionDose(m_doseReference);
+                  m_dvhWidgets[i]->setCalculationProgress(0, 0);
+                }
+              }
+            });
+
+    QFuture<DVHCalculator::DVHData> future =
+        QtConcurrent::run([this, r, binSize, capGy]() {
+          return DVHCalculator::calculateSingleROI(m_volume, m_resampledDose,
+                                                   m_rtstruct, r, binSize,
+                                                   nullptr, {}, capGy);
+        });
+    watcher->setFuture(future);
+  }
+}
+
+void DicomViewer::onDvhVisibilityChanged(int roiIndex, bool visible) {
+  qDebug()
+      << QString("DicomViewer::onDvhVisibilityChanged: roiIndex=%1, visible=%2")
+             .arg(roiIndex)
+             .arg(visible);
+
+  // 範囲チェック
+  if (roiIndex < 0) {
+    qWarning() << QString("Invalid ROI index: %1").arg(roiIndex);
+    return;
+  }
+
+  // DVHデータの範囲チェック
+  if (static_cast<size_t>(roiIndex) >= m_dvhData.size()) {
+    qWarning() << QString("ROI index %1 out of range for DVH data (max: %2)")
+                      .arg(roiIndex)
+                      .arg(static_cast<int>(m_dvhData.size()) - 1);
+    return;
+  }
+
+  try {
+    // DVHデータの可視性を更新
+    m_dvhData[roiIndex].isVisible = visible;
+
+    // 変更を他のDVHウィンドウにも反映
+    if (auto source = qobject_cast<DVHWindow *>(sender())) {
+      for (int i = 0; i < VIEW_COUNT; ++i) {
+        if (m_dvhWidgets[i] && m_dvhWidgets[i] != source) {
+          QSignalBlocker blocker(m_dvhWidgets[i]);
+          m_dvhWidgets[i]->updateVisibility(roiIndex, visible);
+        }
+      }
+    }
+
+    qDebug() << QString("DVH visibility updated for ROI %1").arg(roiIndex);
+
+  } catch (const std::exception &e) {
+    qCritical() << QString("Error in onDvhVisibilityChanged for ROI %1: %2")
+                       .arg(roiIndex)
+                       .arg(e.what());
+  } catch (...) {
+    qCritical() << QString("Unknown error in onDvhVisibilityChanged for ROI %1")
+                       .arg(roiIndex);
+  }
+}
+
+void DicomViewer::onProfileLineSelection(int viewIndex) {
+  m_profileRequester = viewIndex;
+  m_selectingProfileLine = true;
+  m_profileLineHasStart = false;
+  if (m_profileLineVisible) {
+    m_profileLineVisible = false;
+    updateImage(m_profileLineView);
+  }
+}
+
+void DicomViewer::onProfileLineSaveRequested(int viewIndex, int slotIndex) {
+  if (slotIndex < 0 || slotIndex >= 3)
+    return;
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  auto hasValidPatientPoint = [](const QVector3D &p) {
+    return !std::isnan(p.x()) && !std::isnan(p.y()) && !std::isnan(p.z());
+  };
+
+  const bool hasLineGeometry =
+      m_profileLine.points.size() >= 2 &&
+      (m_profileLine.points[0] != m_profileLine.points[1]);
+
+  if (!hasLineGeometry || !hasValidPatientPoint(m_profileStartPatient) ||
+      !hasValidPatientPoint(m_profileEndPatient)) {
+    QMessageBox::information(this, tr("Dose Profile"),
+                             tr("No dose profile line is active to save."));
+    return;
+  }
+
+  SavedProfileLine &slot = m_savedProfileLines[viewIndex][slotIndex];
+  slot.valid = true;
+  slot.startPatient = m_profileStartPatient;
+  slot.endPatient = m_profileEndPatient;
+
+  writeProfileLineSlot(viewIndex, slotIndex);
+  updateProfileSlotButtons(viewIndex);
+}
+
+void DicomViewer::onProfileLineLoadRequested(int viewIndex, int slotIndex) {
+  if (slotIndex < 0 || slotIndex >= 3)
+    return;
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  const bool wasVisible = m_profileLineVisible;
+  const int previousView = m_profileLineView;
+  const SavedProfileLine &slot = m_savedProfileLines[viewIndex][slotIndex];
+  if (!slot.valid) {
+    QMessageBox::information(this, tr("Dose Profile"),
+                             tr("No saved line in the selected slot."));
+    return;
+  }
+
+  QPointF startPlane = planeCoordinateFromPatient(viewIndex, slot.startPatient);
+  QPointF endPlane = planeCoordinateFromPatient(viewIndex, slot.endPatient);
+  if (std::isnan(startPlane.x()) || std::isnan(startPlane.y()) ||
+      std::isnan(endPlane.x()) || std::isnan(endPlane.y())) {
+    QMessageBox::warning(this, tr("Dose Profile"),
+                         tr("Saved line cannot be displayed in this view."));
+    return;
+  }
+
+  m_profileLineVisible = true;
+  m_profileLineView = viewIndex;
+  m_profileLine.color = Qt::yellow;
+  m_profileLine.points.resize(2);
+  m_profileLine.points[0] = startPlane;
+  m_profileLine.points[1] = endPlane;
+  m_profileStartPatient = slot.startPatient;
+  m_profileEndPatient = slot.endPatient;
+  m_selectingProfileLine = false;
+  m_profileLineHasStart = false;
+  m_dragProfileStart = false;
+  m_dragProfileEnd = false;
+  m_profileRequester = viewIndex;
+
+  computeDoseProfile();
+  if (wasVisible && previousView != viewIndex && previousView >= 0 &&
+      previousView < VIEW_COUNT)
+    updateImage(previousView);
+  updateImage(viewIndex);
+}
+
+void DicomViewer::computeDoseProfile() {
+  if (!m_resampledDose.isResampled() || m_profileRequester < 0)
+    return;
+
+  double length = (m_profileEndPatient - m_profileStartPatient).length();
+  if (length <= 0.0)
+    return;
+
+  int samples = std::max(2, static_cast<int>(length));
+  QVector<double> positions;
+  QVector<double> doses;
+  positions.reserve(samples);
+  doses.reserve(samples);
+
+  struct RoiTrack {
+    QString name;
+    bool inside{false};
+    double segStart{0.0};
+    QVector<QPair<double, double>> segments; // start,end
+    double maxDose{-std::numeric_limits<double>::infinity()};
+    double minDose{std::numeric_limits<double>::infinity()};
+    QColor color;
+    int index{0};
+  };
+  QVector<RoiTrack> roiInfos;
+  if (m_rtstructLoaded) {
+    int roiCount = m_rtstruct.roiCount();
+    for (int r = 0; r < roiCount; ++r) {
+      if (!m_rtstruct.isROIVisible(r))
+        continue;
+      RoiTrack info;
+      info.name = m_rtstruct.roiName(r);
+      info.color = QColor::fromHsv((r * 40) % 360, 255, 255, 255);
+      info.index = r;
+      roiInfos.append(info);
+    }
+  }
+
+  for (int i = 0; i < samples; ++i) {
+    double t = static_cast<double>(i) / (samples - 1);
+    QVector3D p = m_profileStartPatient +
+                  t * (m_profileEndPatient - m_profileStartPatient);
+    QVector3D vox = m_volume.patientToVoxelContinuous(p);
+    float dose = sampleResampledDose(vox);
+    double pos = t * length;
+    positions.append(pos);
+    doses.append(dose);
+
+    for (auto &info : roiInfos) {
+      bool inside = m_rtstruct.isPointInsideROI(p, info.index);
+      if (inside) {
+        if (!info.inside) {
+          info.inside = true;
+          info.segStart = pos;
+        }
+        info.maxDose = std::max(info.maxDose, static_cast<double>(dose));
+        info.minDose = std::min(info.minDose, static_cast<double>(dose));
+      } else if (info.inside) {
+        info.segments.append(qMakePair(info.segStart, pos));
+        info.inside = false;
+      }
+    }
+  }
+
+  for (auto &info : roiInfos) {
+    if (info.inside) {
+      info.segments.append(qMakePair(info.segStart, length));
+      info.inside = false;
+    }
+  }
+
+  double minDose = *std::min_element(doses.begin(), doses.end());
+  double maxDose = *std::max_element(doses.begin(), doses.end());
+
+  QVector<DoseProfileWindow::Segment> segs;
+  for (const auto &info : roiInfos) {
+    if (info.segments.isEmpty())
+      continue;
+    for (const auto &se : info.segments) {
+      DoseProfileWindow::Segment s;
+      s.startMm = se.first;
+      s.endMm = se.second;
+      s.maxDoseGy = info.maxDose;
+      s.minDoseGy = info.minDose;
+      s.color = info.color;
+      s.name = info.name;
+      segs.append(s);
+    }
+  }
+
+  QVector<DoseProfileWindow::SamplePoint> samplePoints;
+  if (length > 0.0) {
+    const QVector3D direction =
+        (m_profileEndPatient - m_profileStartPatient) / length;
+    auto appendSample = [&](double posMm) {
+      DoseProfileWindow::SamplePoint sample;
+      sample.positionMm = posMm;
+      const QVector3D patientPoint =
+          m_profileStartPatient + direction * posMm;
+      const QVector3D voxelPoint =
+          m_volume.patientToVoxelContinuous(patientPoint);
+      if (auto ct = sampleCtValue(voxelPoint))
+        sample.ctHu = ct;
+      if (auto dose = sampleDoseValue(voxelPoint))
+        sample.doseGy = dose;
+      samplePoints.append(sample);
+    };
+    const double epsilon = 1e-3;
+    const int mmSteps = static_cast<int>(std::floor(length + epsilon));
+    for (int mm = 0; mm <= mmSteps; ++mm)
+      appendSample(static_cast<double>(mm));
+    const double fractional = length - static_cast<double>(mmSteps);
+    if (fractional > epsilon)
+      appendSample(length);
+  }
+
+  if (m_profileRequester >= 0 && m_profileRequester < VIEW_COUNT &&
+      m_profileWidgets[m_profileRequester]) {
+    m_profileWidgets[m_profileRequester]->setStats(length, minDose, maxDose,
+                                                   segs, samplePoints);
+    m_profileWidgets[m_profileRequester]->setProfile(positions, doses, segs);
+  }
+}
+
+void DicomViewer::loadProfileLinePresets() {
+  for (auto &viewSlots : m_savedProfileLines) {
+    for (auto &slot : viewSlots)
+      slot = SavedProfileLine{};
+  }
+
+  QSettings settings(QStringLiteral("ShioRIS3"), QStringLiteral("ShioRIS3"));
+  for (int view = 0; view < VIEW_COUNT; ++view) {
+    for (int slot = 0; slot < 3; ++slot) {
+      const QString base =
+          QStringLiteral("doseProfile/view%1/slot%2").arg(view).arg(slot);
+      const bool valid =
+          settings.value(base + QStringLiteral("/valid"), false).toBool();
+      if (!valid)
+        continue;
+      const bool hasStart = settings.contains(base + QStringLiteral("/startX")) &&
+                            settings.contains(base + QStringLiteral("/startY")) &&
+                            settings.contains(base + QStringLiteral("/startZ"));
+      const bool hasEnd = settings.contains(base + QStringLiteral("/endX")) &&
+                          settings.contains(base + QStringLiteral("/endY")) &&
+                          settings.contains(base + QStringLiteral("/endZ"));
+      if (!hasStart || !hasEnd)
+        continue;
+
+      SavedProfileLine entry;
+      entry.valid = true;
+      entry.startPatient = QVector3D(
+          settings.value(base + QStringLiteral("/startX")).toDouble(),
+          settings.value(base + QStringLiteral("/startY")).toDouble(),
+          settings.value(base + QStringLiteral("/startZ")).toDouble());
+      entry.endPatient = QVector3D(
+          settings.value(base + QStringLiteral("/endX")).toDouble(),
+          settings.value(base + QStringLiteral("/endY")).toDouble(),
+          settings.value(base + QStringLiteral("/endZ")).toDouble());
+      m_savedProfileLines[view][slot] = entry;
+    }
+    updateProfileSlotButtons(view);
+  }
+}
+
+void DicomViewer::writeProfileLineSlot(int viewIndex, int slotIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  if (slotIndex < 0 || slotIndex >= 3)
+    return;
+
+  QSettings settings(QStringLiteral("ShioRIS3"), QStringLiteral("ShioRIS3"));
+  const QString base = QStringLiteral("doseProfile/view%1/slot%2")
+                           .arg(viewIndex)
+                           .arg(slotIndex);
+  const SavedProfileLine &slot = m_savedProfileLines[viewIndex][slotIndex];
+  if (!slot.valid) {
+    settings.remove(base);
+    return;
+  }
+
+  settings.setValue(base + QStringLiteral("/valid"), true);
+  settings.setValue(base + QStringLiteral("/startX"), slot.startPatient.x());
+  settings.setValue(base + QStringLiteral("/startY"), slot.startPatient.y());
+  settings.setValue(base + QStringLiteral("/startZ"), slot.startPatient.z());
+  settings.setValue(base + QStringLiteral("/endX"), slot.endPatient.x());
+  settings.setValue(base + QStringLiteral("/endY"), slot.endPatient.y());
+  settings.setValue(base + QStringLiteral("/endZ"), slot.endPatient.z());
+}
+
+void DicomViewer::updateProfileSlotButtons(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT)
+    return;
+  if (!m_profileWidgets[viewIndex])
+    return;
+  for (int slot = 0; slot < 3; ++slot) {
+    m_profileWidgets[viewIndex]->setLineSlotAvailable(
+        slot, m_savedProfileLines[viewIndex][slot].valid);
+  }
+}
+
+void DicomViewer::onImageDoubleClicked(int viewIndex) {
+  qDebug() << QString("Double-clicked on view %1, current mode: %2")
+                  .arg(viewIndex)
+                  .arg(static_cast<int>(m_viewMode));
+
+  // viewIndexの範囲チェック
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT) {
+    qWarning() << "Invalid viewIndex in onImageDoubleClicked:" << viewIndex;
+    return;
+  }
+
+  if (m_viewMode == ViewMode::Single) {
+    // シングルビュー時は元のマルチビューに戻る
+    qDebug() << QString("Returning to previous view mode: %1")
+                    .arg(static_cast<int>(m_previousViewMode));
+
+    if (m_fullScreenViewIndex >= 0 && m_fullScreenViewIndex < VIEW_COUNT) {
+      // DVHビューの場合は安全にデータを同期
+      if (m_isDVHView[m_fullScreenViewIndex]) {
+        try {
+          // DVHデータの安全な取得と設定
+          if (m_dvhWidgets[0] && !m_dvhWidgets[0]->dvhData().empty()) {
+            auto safeData = m_dvhWidgets[0]->dvhData();
+            int currentIdx = m_dvhWidgets[0]->currentRoiIndex();
+            m_dvhData = safeData;
+            if (m_dvhWidgets[m_fullScreenViewIndex]) {
+              // シグナルを一時的に無効にしてデータを設定
+              m_dvhWidgets[m_fullScreenViewIndex]->blockSignals(true);
+              m_dvhWidgets[m_fullScreenViewIndex]->setDVHData(safeData);
+              m_dvhWidgets[m_fullScreenViewIndex]->setPatientInfo(
+                  patientInfoText());
+              m_dvhWidgets[m_fullScreenViewIndex]->setPrescriptionDose(
+                  m_dvhWidgets[0]->prescriptionDose());
+              m_dvhWidgets[m_fullScreenViewIndex]->setAxisUnits(
+                  m_dvhWidgets[0]->isXAxisPercent(),
+                  m_dvhWidgets[0]->isYAxisCc());
+              m_dvhWidgets[m_fullScreenViewIndex]->setCurrentRoiIndex(
+                  currentIdx);
+              // Sync CalcMax without triggering full recompute
+              if (m_dvhWidgets[0]->isCalcMaxAuto()) {
+                m_dvhWidgets[m_fullScreenViewIndex]->setCalcMaxAuto();
+              } else {
+                m_dvhWidgets[m_fullScreenViewIndex]->setCalcMaxGyNoRecalc(
+                    m_dvhWidgets[0]->calcMaxGy());
+              }
+              m_dvhWidgets[m_fullScreenViewIndex]->blockSignals(false);
+            }
+          }
+        } catch (const std::exception &e) {
+          qCritical() << "Error in DVH data synchronization:" << e.what();
+        } catch (...) {
+          qCritical() << "Unknown error in DVH data synchronization";
+        }
+      } else {
+        // 通常の画像ビューの場合
+        if (m_fullScreenViewIndex < VIEW_COUNT) {
+          m_originalImages[m_fullScreenViewIndex] = m_originalImages[0];
+          m_currentIndices[m_fullScreenViewIndex] = m_currentIndices[0];
+          m_viewOrientations[m_fullScreenViewIndex] = m_viewOrientations[0];
+          m_panOffsets[m_fullScreenViewIndex] = m_panOffsets[0];
+
+          // スライダーの安全な更新
+          if (m_sliceSliders[m_fullScreenViewIndex] && m_sliceSliders[0]) {
+            m_sliceSliders[m_fullScreenViewIndex]->blockSignals(true);
+            m_sliceSliders[m_fullScreenViewIndex]->setRange(
+                m_sliceSliders[0]->minimum(), m_sliceSliders[0]->maximum());
+            m_sliceSliders[m_fullScreenViewIndex]->setValue(
+                m_sliceSliders[0]->value());
+            m_sliceSliders[m_fullScreenViewIndex]->setEnabled(
+                m_sliceSliders[0]->isEnabled());
+            m_sliceSliders[m_fullScreenViewIndex]->blockSignals(false);
+          }
+        }
+      }
+    }
+
+    // 保存されたビュー0の状態を復元
+    if (m_hasSavedView0) {
+      try {
+        m_originalImages[0] = m_savedImage0;
+        m_currentIndices[0] = m_savedIndex0;
+        m_viewOrientations[0] = m_savedOrientation0;
+        m_panOffsets[0] = m_savedPanOffset0;
+        m_isDVHView[0] = m_savedIsDVH0;
+        m_is3DView[0] = m_savedIs3D0;
+
+        // スライダーの安全な復元
+        if (m_sliceSliders[0]) {
+          m_sliceSliders[0]->blockSignals(true);
+          m_sliceSliders[0]->setRange(m_savedSliderMin0, m_savedSliderMax0);
+          m_sliceSliders[0]->setValue(m_savedSliderValue0);
+          m_sliceSliders[0]->setEnabled(m_savedSliderEnabled0);
+          m_sliceSliders[0]->blockSignals(false);
+        }
+
+        // DVHビューまたは画像ビューの復元
+        if (m_savedIsDVH0) {
+          if (m_viewStacks[0] && m_dvhWidgets[0]) {
+            m_viewStacks[0]->setCurrentWidget(m_dvhWidgets[0]);
+
+            // DVHデータの安全な設定
+            if (!m_savedDVHData0.empty()) {
+              m_dvhWidgets[0]->blockSignals(true);
+              m_dvhWidgets[0]->setDVHData(m_savedDVHData0);
+              m_dvhWidgets[0]->setPatientInfo(patientInfoText());
+              m_dvhWidgets[0]->setPrescriptionDose(m_savedPrescriptionDose0);
+              m_dvhWidgets[0]->setAxisUnits(m_savedXAxisPercent0,
+                                            m_savedYAxisCc0);
+              m_dvhWidgets[0]->setCurrentRoiIndex(m_savedCurrentRoiIndex0);
+              m_dvhWidgets[0]->blockSignals(false);
+            }
+
+            // UI要素を隠す
+            if (m_sliceIndexLabels[0])
+              m_sliceIndexLabels[0]->hide();
+            if (m_infoOverlays[0])
+              m_infoOverlays[0]->hide();
+            if (m_coordLabels[0])
+              m_coordLabels[0]->hide();
+            if (m_cursorDoseLabels[0])
+              m_cursorDoseLabels[0]->hide();
+            m_imageWidgets[0]->clearCursorCross();
+          }
+        } else if (m_savedIs3D0) {
+          if (m_viewStacks[0] && m_3dWidgets[0]) {
+            m_viewStacks[0]->setCurrentWidget(m_3dWidgets[0]);
+            if (m_sliceIndexLabels[0])
+              m_sliceIndexLabels[0]->hide();
+            if (m_infoOverlays[0])
+              m_infoOverlays[0]->hide();
+            if (m_coordLabels[0])
+              m_coordLabels[0]->hide();
+            if (m_cursorDoseLabels[0])
+              m_cursorDoseLabels[0]->hide();
+            m_imageWidgets[0]->clearCursorCross();
+          }
+        } else {
+          if (m_viewStacks[0] && m_imagePanels[0]) {
+            m_viewStacks[0]->setCurrentWidget(m_imagePanels[0]);
+
+            // UI要素を表示
+            if (m_sliceIndexLabels[0])
+              m_sliceIndexLabels[0]->show();
+            if (m_infoOverlays[0])
+              m_infoOverlays[0]->show();
+            if (m_coordLabels[0])
+              m_coordLabels[0]->show();
+            if (m_cursorDoseLabels[0])
+              m_cursorDoseLabels[0]->hide();
+            m_imageWidgets[0]->clearCursorCross();
+          }
+        }
+        m_hasSavedView0 = false;
+      } catch (const std::exception &e) {
+        qCritical() << "Error restoring saved view state:" << e.what();
+      } catch (...) {
+        qCritical() << "Unknown error restoring saved view state";
+      }
+    }
+
+    // ビューモードを安全に復元
+    setViewMode(m_previousViewMode);
+    updateSliceLabels();
+    updateOrientationButtonTexts();
+    m_fullScreenViewIndex = -1;
+
+  } else {
+    // マルチビュー時はそのビューを全画面表示
+    qDebug() << QString("Switching to full screen for view %1").arg(viewIndex);
+
+    try {
+      // 現在のモードを保存
+      m_previousViewMode = m_viewMode;
+      m_fullScreenViewIndex = viewIndex;
+
+      // ダブルクリックされたビューの内容を1番目のビューにコピー
+      if (viewIndex != 0) {
+        // 現在のビュー0の状態を安全に退避
+        m_savedImage0 = m_originalImages[0];
+        m_savedIndex0 = m_currentIndices[0];
+        m_savedOrientation0 = m_viewOrientations[0];
+        m_savedPanOffset0 = m_panOffsets[0];
+        m_savedIsDVH0 = m_isDVHView[0];
+        m_savedIs3D0 = m_is3DView[0];
+
+        // スライダー状態の保存
+        if (m_sliceSliders[0]) {
+          m_savedSliderMin0 = m_sliceSliders[0]->minimum();
+          m_savedSliderMax0 = m_sliceSliders[0]->maximum();
+          m_savedSliderValue0 = m_sliceSliders[0]->value();
+          m_savedSliderEnabled0 = m_sliceSliders[0]->isEnabled();
+        }
+
+        // DVHデータと表示状態の保存
+        if (m_isDVHView[0] && m_dvhWidgets[0]) {
+          m_savedDVHData0 = m_dvhWidgets[0]->dvhData();
+          m_savedPrescriptionDose0 = m_dvhWidgets[0]->prescriptionDose();
+          m_savedXAxisPercent0 = m_dvhWidgets[0]->isXAxisPercent();
+          m_savedYAxisCc0 = m_dvhWidgets[0]->isYAxisCc();
+          m_savedCurrentRoiIndex0 = m_dvhWidgets[0]->currentRoiIndex();
+        }
+
+        m_hasSavedView0 = true;
+
+        // ダブルクリックされたビューの内容をビュー0にコピー
+        m_originalImages[0] = m_originalImages[viewIndex];
+        m_currentIndices[0] = m_currentIndices[viewIndex];
+        m_viewOrientations[0] = m_viewOrientations[viewIndex];
+        m_panOffsets[0] = m_panOffsets[viewIndex];
+        m_isDVHView[0] = m_isDVHView[viewIndex];
+        m_is3DView[0] = m_is3DView[viewIndex];
+
+        // スライダーの安全なコピー
+        if (m_sliceSliders[0] && m_sliceSliders[viewIndex]) {
+          m_sliceSliders[0]->blockSignals(true);
+          m_sliceSliders[0]->setRange(m_sliceSliders[viewIndex]->minimum(),
+                                      m_sliceSliders[viewIndex]->maximum());
+          m_sliceSliders[0]->setValue(m_sliceSliders[viewIndex]->value());
+          m_sliceSliders[0]->setEnabled(m_sliceSliders[viewIndex]->isEnabled());
+          m_sliceSliders[0]->blockSignals(false);
+        }
+
+        // DVHビューまたは画像ビューの設定
+        if (m_isDVHView[viewIndex]) {
+          if (m_viewStacks[0] && m_dvhWidgets[0] && m_dvhWidgets[viewIndex]) {
+            m_viewStacks[0]->setCurrentWidget(m_dvhWidgets[0]);
+
+            // DVHデータの安全なコピーと表示設定の同期
+            auto source = m_dvhWidgets[viewIndex];
+            auto sourceData = source->dvhData();
+            if (!sourceData.empty()) {
+              m_dvhWidgets[0]->blockSignals(true);
+              m_dvhWidgets[0]->setDVHData(sourceData);
+              m_dvhWidgets[0]->setPatientInfo(patientInfoText());
+              m_dvhWidgets[0]->setPrescriptionDose(source->prescriptionDose());
+              m_dvhWidgets[0]->setAxisUnits(source->isXAxisPercent(),
+                                            source->isYAxisCc());
+              m_dvhWidgets[0]->setCurrentRoiIndex(source->currentRoiIndex());
+              // Sync CalcMax without triggering full recompute
+              if (source->isCalcMaxAuto()) {
+                m_dvhWidgets[0]->setCalcMaxAuto();
+              } else {
+                m_dvhWidgets[0]->setCalcMaxGyNoRecalc(source->calcMaxGy());
+              }
+              m_dvhWidgets[0]->blockSignals(false);
+            }
+
+            // UI要素を隠す
+            if (m_sliceIndexLabels[0])
+              m_sliceIndexLabels[0]->hide();
+            if (m_infoOverlays[0])
+              m_infoOverlays[0]->hide();
+            if (m_coordLabels[0])
+              m_coordLabels[0]->hide();
+            if (m_cursorDoseLabels[0])
+              m_cursorDoseLabels[0]->hide();
+            m_imageWidgets[0]->clearCursorCross();
+          }
+        } else if (m_is3DView[viewIndex]) {
+          if (m_viewStacks[0] && m_3dWidgets[0]) {
+            m_viewStacks[0]->setCurrentWidget(m_3dWidgets[0]);
+            if (m_sliceIndexLabels[0])
+              m_sliceIndexLabels[0]->hide();
+            if (m_infoOverlays[0])
+              m_infoOverlays[0]->hide();
+            if (m_coordLabels[0])
+              m_coordLabels[0]->hide();
+            if (m_cursorDoseLabels[0])
+              m_cursorDoseLabels[0]->hide();
+            m_imageWidgets[0]->clearCursorCross();
+          }
+        } else {
+          if (m_viewStacks[0] && m_imagePanels[0]) {
+            m_viewStacks[0]->setCurrentWidget(m_imagePanels[0]);
+
+            // UI要素を表示
+            if (m_sliceIndexLabels[0])
+              m_sliceIndexLabels[0]->show();
+            if (m_infoOverlays[0])
+              m_infoOverlays[0]->show();
+            if (m_coordLabels[0])
+              m_coordLabels[0]->show();
+            if (m_cursorDoseLabels[0])
+              m_cursorDoseLabels[0]->hide();
+            m_imageWidgets[0]->clearCursorCross();
+          }
+        }
+      }
+
+      // シングルビューモードに設定
+      setViewMode(ViewMode::Single);
+      updateSliceLabels();
+      updateOrientationButtonTexts();
+
+    } catch (const std::exception &e) {
+      qCritical() << "Error in full screen mode switch:" << e.what();
+      // エラーが発生した場合は状態をリセット
+      m_fullScreenViewIndex = -1;
+      m_hasSavedView0 = false;
+    } catch (...) {
+      qCritical() << "Unknown error in full screen mode switch";
+      // エラーが発生した場合は状態をリセット
+      m_fullScreenViewIndex = -1;
+      m_hasSavedView0 = false;
+    }
+  }
+}
+
+void DicomViewer::onSlicePositionToggled(bool checked) {
+  m_showSlicePosition = checked;
+  updateImage();
+}
+
+//=============================================================================
+// ファイル: src/visualization/dicom_viewer.cpp - getCurrentVolume メソッド修正
+// 修正内容: 実際のクラス構造に合わせた実装
+//=============================================================================
+
+// 6518行目周辺の getCurrentVolume() メソッドを以下に置き換え:
+
+cv::Mat DicomViewer::getCurrentVolume() const {
+    // DicomVolumeが読み込まれている場合
+    if (isVolumeLoaded()) {
+        qDebug() << "Getting volume from m_volume (3D volume loaded)";
+        
+        try {
+            int width = m_volume.width();
+            int height = m_volume.height(); 
+            int depth = m_volume.depth();
+            
+            if (width <= 0 || height <= 0 || depth <= 0) {
+                qWarning() << "Invalid volume dimensions:" << width << "x" << height << "x" << depth;
+                return cv::Mat();
+            }
+            
+            qDebug() << "Volume dimensions:" << width << "x" << height << "x" << depth;
+            
+            // OpenCVの3Dボリューム作成
+            int sizes[] = {depth, height, width};
+            cv::Mat volume(3, sizes, CV_16SC1);
+            
+            // DicomVolumeからデータをコピー
+            // 注意: DicomVolumeの内部実装に依存するため、適宜調整が必要
+            for (int z = 0; z < depth; ++z) {
+                // 各スライスを取得してコピー
+                QImage slice = m_volume.getSlice(z, DicomVolume::Orientation::Axial, 
+                                               m_windowSlider ? m_windowSlider->value() : 256, 
+                                               m_levelSlider ? m_levelSlider->value() : 128);
+                
+                if (slice.isNull()) {
+                    qWarning() << "Failed to get slice" << z;
+                    continue;
+                }
+                
+                // QImageからOpenCV Matに変換（簡易実装）
+                if (slice.format() != QImage::Format_Grayscale8) {
+                    slice = slice.convertToFormat(QImage::Format_Grayscale8);
+                }
+                
+                for (int y = 0; y < height && y < slice.height(); ++y) {
+                    for (int x = 0; x < width && x < slice.width(); ++x) {
+                        // グレースケール値を16bitに変換（CT値範囲に調整）
+                        uchar gray = slice.pixelColor(x, y).red();
+                        int16_t ctValue = static_cast<int16_t>(gray - 128) * 16; // 簡易的なCT値変換
+                        volume.at<int16_t>(z, y, x) = ctValue;
+                    }
+                }
+            }
+            
+            qDebug() << "Volume created successfully from DicomVolume";
+            return volume;
+            
+        } catch (const std::exception &e) {
+            qCritical() << "Error creating volume from DicomVolume:" << e.what();
+            return cv::Mat();
+        }
+    }
+    
+    // 単一ファイルまたは複数ファイルが読み込まれている場合
+    if (!m_dicomFiles.isEmpty()) {
+        qDebug() << "Getting volume from m_dicomFiles:" << m_dicomFiles.size() << "files";
+        
+        if (m_dicomFiles.size() == 1) {
+            // 単一スライスの場合
+            return getSingleSliceAsMatrix();
+        } else {
+            // 複数スライスから3Dボリューム構築
+            return buildVolumeFromFiles();
+        }
+    }
+    
+    qWarning() << "No volume or files available";
+    return cv::Mat();
+}
+
+cv::Mat DicomViewer::getSegmentationVolumeRaw() const {
+  if (!isVolumeLoaded()) {
+    qWarning() << "No 3D volume loaded for segmentation";
+    return cv::Mat();
+  }
+
+  const cv::Mat &data = m_volume.data();
+  if (data.empty()) {
+    qWarning() << "Volume data is empty";
+    return cv::Mat();
+  }
+
+  return data.clone();
+}
+
+#ifdef USE_ONNXRUNTIME
+OnnxSegmenter *DicomViewer::getSegmentationModel() const {
+  if (m_segModel && m_segModel->isLoaded()) {
+    return m_segModel.get();
+  }
+  return nullptr;
+}
+
+bool DicomViewer::applySegmentationVolume(const cv::Mat &labels,
+                                          QString *structureSummary) {
+  if (!isVolumeLoaded()) {
+    qWarning() << "No CT volume loaded to apply segmentation";
+    return false;
+  }
+
+  if (labels.empty()) {
+    qWarning() << "Segmentation labels are empty";
+    return false;
+  }
+
+  if (labels.dims != 3 || labels.size[0] != m_volume.depth() ||
+      labels.size[1] != m_volume.height() || labels.size[2] != m_volume.width()) {
+    qWarning() << "Segmentation size does not match the loaded volume"
+               << "labels:" << labels.size[0] << labels.size[1] << labels.size[2]
+               << "volume:" << m_volume.depth() << m_volume.height()
+               << m_volume.width();
+    return false;
+  }
+
+  m_segmentationVolume = labels.clone();
+
+  const int depth = m_volume.depth();
+  const int height = m_volume.height();
+  const int width = m_volume.width();
+
+  if (m_useStructureBoundingBox) {
+    QVector3D voxelMin = m_volume.patientToVoxelContinuous(m_segBoundingBoxMin);
+    QVector3D voxelMax = m_volume.patientToVoxelContinuous(m_segBoundingBoxMax);
+
+    int xMin = std::max(0, static_cast<int>(std::floor(std::min(voxelMin.x(), voxelMax.x()))));
+    int xMax = std::min(width - 1, static_cast<int>(std::ceil(std::max(voxelMin.x(), voxelMax.x()))));
+    int yMin = std::max(0, static_cast<int>(std::floor(std::min(voxelMin.y(), voxelMax.y()))));
+    int yMax = std::min(height - 1, static_cast<int>(std::ceil(std::max(voxelMin.y(), voxelMax.y()))));
+    int zMin = std::max(0, static_cast<int>(std::floor(std::min(voxelMin.z(), voxelMax.z()))));
+    int zMax = std::min(depth - 1, static_cast<int>(std::ceil(std::max(voxelMin.z(), voxelMax.z()))));
+
+    for (int z = 0; z < depth; ++z) {
+      for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+          if (x < xMin || x > xMax || y < yMin || y > yMax || z < zMin ||
+              z > zMax) {
+            m_segmentationVolume.at<unsigned char>(z, y, x) = 0;
+          }
+        }
+      }
+    }
+  }
+
+  m_visibleSegLabels.clear();
+  if (m_segLabelList) {
+    m_segLabelList->clear();
+  }
+
+  std::set<int> structures;
+  for (int z = 0; z < depth; ++z) {
+    cv::Mat dst(height, width, CV_8UC1, m_segmentationVolume.ptr<unsigned char>(z),
+                m_segmentationVolume.step[1]);
+    for (int y = 0; y < dst.rows; ++y) {
+      const unsigned char *row = dst.ptr<unsigned char>(y);
+      for (int x = 0; x < dst.cols; ++x) {
+        int v = row[x];
+        if (v > 0) {
+          structures.insert(v);
+        }
+      }
+    }
+  }
+
+  auto organLabels = OnnxSegmenter::getOrganLabels();
+  QString msg;
+  if (structures.empty()) {
+    msg = tr("No structures detected.");
+    if (m_segLabelList) {
+      m_segLabelList->setEnabled(false);
+    }
+  } else {
+    QStringList names;
+    for (int label : structures) {
+      QString name;
+      if (label >= 0 && label < organLabels.size()) {
+        name = QString::fromStdString(organLabels[label]);
+      } else {
+        name = tr("Label %1").arg(label);
+      }
+      if (m_segLabelList) {
+        QListWidgetItem *item = new QListWidgetItem(name, m_segLabelList);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(Qt::Checked);
+        item->setData(Qt::UserRole, label);
+      }
+      m_visibleSegLabels.insert(label);
+      names << name;
+    }
+    if (m_segLabelList) {
+      m_segLabelList->setEnabled(true);
+    }
+    msg = tr("Structures: %1").arg(names.join(", "));
+  }
+
+  m_segmentationReady = true;
+  m_segmentationVisible = true;
+
+  if (m_showSegCheck && !m_showSegCheck->isChecked()) {
+    QSignalBlocker blocker(m_showSegCheck);
+    m_showSegCheck->setChecked(true);
+  }
+
+  updateImage();
+
+  if (structureSummary) {
+    *structureSummary = msg;
+  }
+
+  return true;
+}
+#endif
+
+cv::Mat DicomViewer::getSingleSliceAsMatrix() const {
+    if (m_dicomFiles.isEmpty()) {
+        return cv::Mat();
+    }
+    
+    try {
+        // 現在表示中の画像を使用
+        QImage currentImage = m_originalImages[0]; // 最初のビューの画像
+        
+        if (currentImage.isNull()) {
+            qWarning() << "Current image is null";
+            return cv::Mat();
+        }
+        
+        // QImageをOpenCV Matに変換
+        if (currentImage.format() != QImage::Format_Grayscale8) {
+            currentImage = currentImage.convertToFormat(QImage::Format_Grayscale8);
+        }
+        
+        cv::Mat result(currentImage.height(), currentImage.width(), CV_8UC1);
+        
+        for (int y = 0; y < currentImage.height(); ++y) {
+            for (int x = 0; x < currentImage.width(); ++x) {
+                uchar gray = currentImage.pixelColor(x, y).red();
+                result.at<uchar>(y, x) = gray;
+            }
+        }
+        
+        qDebug() << "Single slice converted to Mat:" << result.cols << "x" << result.rows;
+        return result;
+        
+    } catch (const std::exception &e) {
+        qCritical() << "Error converting single slice:" << e.what();
+        return cv::Mat();
+    }
+}
+
+// ヘルパーメソッド: 複数ファイルから3Dボリューム構築
+cv::Mat DicomViewer::buildVolumeFromFiles() const {
+    if (m_dicomFiles.isEmpty()) {
+        return cv::Mat();
+    }
+    
+    try {
+        qDebug() << "Building volume from" << m_dicomFiles.size() << "files";
+        
+        // 最初のファイルから画像サイズを取得
+        DicomReader reader;
+        if (!reader.loadDicomFile(m_dicomFiles.first())) {
+            qWarning() << "Failed to load first DICOM file";
+            return cv::Mat();
+        }
+        
+        int width = reader.getWidth();
+        int height = reader.getHeight();
+        int depth = m_dicomFiles.size();
+        
+        qDebug() << "Building volume with dimensions:" << width << "x" << height << "x" << depth;
+        
+        // 3Dボリューム作成
+        int sizes[] = {depth, height, width};
+        cv::Mat volume(3, sizes, CV_8UC1);
+        
+        // 各ファイルを読み込んでボリュームに追加
+        for (int z = 0; z < depth; ++z) {
+            if (!reader.loadDicomFile(m_dicomFiles[z])) {
+                qWarning() << "Failed to load DICOM file" << z << ":" << m_dicomFiles[z];
+                continue;
+            }
+            
+            QImage slice = reader.getImage();
+            if (slice.isNull()) {
+                qWarning() << "Null image from file" << z;
+                continue;
+            }
+            
+            if (slice.format() != QImage::Format_Grayscale8) {
+                slice = slice.convertToFormat(QImage::Format_Grayscale8);
+            }
+            
+            // スライスをボリュームにコピー
+            for (int y = 0; y < height && y < slice.height(); ++y) {
+                for (int x = 0; x < width && x < slice.width(); ++x) {
+                    uchar gray = slice.pixelColor(x, y).red();
+                    volume.at<uchar>(z, y, x) = gray;
+                }
+            }
+        }
+        
+        qDebug() << "Volume built successfully from files";
+        return volume;
+        
+    } catch (const std::exception &e) {
+        qCritical() << "Error building volume from files:" << e.what();
+        return cv::Mat();
+    }
+}
+
+bool DicomViewer::applySegmentationOverlay(const cv::Mat &segmentation) {
+    if (segmentation.empty()) {
+        qWarning() << "Empty segmentation provided";
+        return false;
+    }
+    
+    try {
+        // 現在のボリュームとセグメンテーションのサイズチェック
+        cv::Mat currentVolume = getCurrentVolume();
+        if (currentVolume.empty()) {
+            qWarning() << "No current volume to apply segmentation to";
+            return false;
+        }
+        
+        // サイズ検証
+        bool sizeMatch = false;
+        if (segmentation.dims == currentVolume.dims) {
+            if (segmentation.dims == 3) {
+                sizeMatch = (segmentation.size[0] == currentVolume.size[0] &&
+                           segmentation.size[1] == currentVolume.size[1] &&
+                           segmentation.size[2] == currentVolume.size[2]);
+            } else if (segmentation.dims == 2) {
+                sizeMatch = (segmentation.rows == currentVolume.rows &&
+                           segmentation.cols == currentVolume.cols);
+            }
+        }
+        
+        if (!sizeMatch) {
+            qWarning() << "Segmentation size doesn't match current volume";
+            qDebug() << "Segmentation dims:" << segmentation.dims;
+            qDebug() << "Volume dims:" << currentVolume.dims;
+            return false;
+        }
+        
+        // セグメンテーションオーバーレイを設定
+        m_segmentationOverlay = segmentation.clone();
+        m_segmentationVisible = true;
+        
+        // カラーパレット初期化
+        if (m_segmentationColors.empty()) {
+            initializeSegmentationColors();
+        }
+        
+        qDebug() << "Segmentation overlay applied successfully";
+        
+        // 画面更新
+        update();
+        
+        return true;
+        
+    } catch (const std::exception &e) {
+        qCritical() << "Error applying segmentation overlay:" << e.what();
+        return false;
+    }
+}
+
+void DicomViewer::setSegmentationPreview(const cv::Mat &segmentation) {
+    m_segmentationPreview = segmentation.clone();
+    
+    // プレビューモードでは薄く表示
+    float originalOpacity = m_segmentationOpacity;
+    m_segmentationOpacity = 0.3f;
+    
+    // 一時的にプレビューをオーバーレイとして設定
+    cv::Mat tempOverlay = m_segmentationOverlay;
+    m_segmentationOverlay = m_segmentationPreview;
+    
+    update();
+    
+    // 元の設定に戻す
+    m_segmentationOverlay = tempOverlay;
+    m_segmentationOpacity = originalOpacity;
+    
+    qDebug() << "Segmentation preview set";
+}
+
+void DicomViewer::clearSegmentationOverlay() {
+    m_segmentationOverlay = cv::Mat();
+    m_segmentationPreview = cv::Mat();
+    m_segmentationVisible = false;
+    
+    update();
+    
+    qDebug() << "Segmentation overlay cleared";
+}
+
+void DicomViewer::setSegmentationOpacity(float opacity) {
+    m_segmentationOpacity = std::max(0.0f, std::min(1.0f, opacity));
+    
+    if (m_segmentationVisible && !m_segmentationOverlay.empty()) {
+        update();
+    }
+}
+
+void DicomViewer::toggleSegmentationVisibility(bool visible) {
+    m_segmentationVisible = visible;
+
+    if (!m_segmentationOverlay.empty()) {
+        update();
+    }
+}
+
+void DicomViewer::setFusionPreviewImage(const QImage &image, double spacingX,
+                                        double spacingY) {
+  if (image.isNull()) {
+    clearFusionPreviewImage();
+    return;
+  }
+
+  bool firstActivation = !m_fusionViewActive;
+  m_fusionViewActive = true;
+  m_fusionViewImage = image;
+  m_fusionSpacingX = spacingX > 0.0 ? spacingX : 1.0;
+  m_fusionSpacingY = spacingY > 0.0 ? spacingY : 1.0;
+
+  if (firstActivation) {
+    m_viewModeBeforeFusion = m_viewMode;
+    if (m_viewMode == ViewMode::Single) {
+      m_restoreViewModeAfterFusion = true;
+      setViewMode(ViewMode::Dual);
+    } else {
+      m_restoreViewModeAfterFusion = false;
+    }
+  }
+
+  setViewToImage(1);
+
+  if (firstActivation) {
+    if (m_sliceSliders[1]) {
+      QSignalBlocker blocker(m_sliceSliders[1]);
+      m_sliceSliders[1]->setRange(0, 0);
+      m_sliceSliders[1]->setValue(0);
+      m_sliceSliders[1]->setEnabled(false);
+    }
+    if (m_orientationButtons[1])
+      m_orientationButtons[1]->setVisible(false);
+    m_panOffsets[1] = QPointF(0.0, 0.0);
+  }
+
+  if (m_sliceIndexLabels[1]) {
+    m_sliceIndexLabels[1]->setText(tr("Fusion"));
+    m_sliceIndexLabels[1]->adjustSize();
+    m_sliceIndexLabels[1]->show();
+  }
+
+  m_imageWidgets[1]->setPan(m_panOffsets[1]);
+  updateImage(1, false);
+  updateImageSeriesButtons();
+}
+
+void DicomViewer::clearFusionPreviewImage() {
+  if (!m_fusionViewActive)
+    return;
+
+  m_fusionViewActive = false;
+  m_fusionViewImage = QImage();
+  m_fusionSpacingX = 1.0;
+  m_fusionSpacingY = 1.0;
+
+  bool restoreMode = m_restoreViewModeAfterFusion;
+  ViewMode modeToRestore = m_viewModeBeforeFusion;
+  m_restoreViewModeAfterFusion = false;
+
+  if (restoreMode)
+    setViewMode(modeToRestore);
+
+  if (m_sliceSliders[1]) {
+    QSignalBlocker blocker(m_sliceSliders[1]);
+    m_sliceSliders[1]->setEnabled(true);
+    if (isVolumeLoaded()) {
+      int count = sliceCountForOrientation(m_viewOrientations[1]);
+      int maxIndex = count > 0 ? count - 1 : 0;
+      m_sliceSliders[1]->setRange(0, maxIndex);
+      int idx = std::clamp(m_currentIndices[1], 0, maxIndex);
+      m_sliceSliders[1]->setValue(idx);
+    } else if (!m_dicomFiles.isEmpty()) {
+      int maxIndex = std::max(0, static_cast<int>(m_dicomFiles.size()) - 1);
+      m_sliceSliders[1]->setRange(0, maxIndex);
+      int idx = std::clamp(m_currentIndices[1], 0, maxIndex);
+      m_sliceSliders[1]->setValue(idx);
+    } else {
+      m_sliceSliders[1]->setRange(0, 0);
+      m_sliceSliders[1]->setValue(0);
+    }
+  }
+
+  if (m_orientationButtons[1])
+    m_orientationButtons[1]->setVisible(isVolumeLoaded());
+
+  if (m_sliceIndexLabels[1]) {
+    m_sliceIndexLabels[1]->setText(QString());
+  }
+
+  updateImageSeriesButtons();
+
+  if (isVolumeLoaded()) {
+    loadVolumeSlice(1, m_currentIndices[1]);
+  } else if (!m_dicomFiles.isEmpty()) {
+    loadSlice(1, m_currentIndices[1]);
+  } else {
+    m_imageWidgets[1]->setImage(QImage());
+    m_imageWidgets[1]->setStructureLines(StructureLineList());
+    m_imageWidgets[1]->setStructurePoints(StructurePointList());
+    m_imageWidgets[1]->setSlicePositionLines(StructureLineList());
+  }
+
+  updateSliceLabels();
+}
+
+bool DicomViewer::showExternalImageSeries(const QString &directory,
+                                          const QString &modality,
+                                          const DicomVolume &volume,
+                                          double window, double level) {
+  QString resolvedPath = directory.trimmed();
+  if (resolvedPath.isEmpty())
+    return false;
+
+  QDir dir(resolvedPath);
+  const QString absolute = dir.absolutePath();
+  if (!absolute.isEmpty())
+    resolvedPath = QDir::cleanPath(absolute);
+
+  if (resolvedPath.isEmpty())
+    return false;
+
+  QString resolvedModality = modality.trimmed();
+  if (resolvedModality.isEmpty())
+    resolvedModality = QStringLiteral("MRI");
+
+  int index = -1;
+  for (int i = 0; i < m_imageSeriesDirs.size(); ++i) {
+    if (m_imageSeriesDirs.at(i).compare(resolvedPath, Qt::CaseInsensitive) == 0) {
+      index = i;
+      break;
+    }
+  }
+
+  if (index < 0) {
+    m_imageSeriesDirs << resolvedPath;
+    m_imageSeriesModalities << resolvedModality;
+    m_seriesVolumeCache.emplace_back();
+    m_seriesWindowValues.append(0.0);
+    m_seriesLevelValues.append(0.0);
+    m_seriesWindowLevelInitialized.append(false);
+    index = m_imageSeriesDirs.size() - 1;
+  } else {
+    if (index >= m_imageSeriesModalities.size())
+      m_imageSeriesModalities.resize(m_imageSeriesDirs.size());
+    m_imageSeriesModalities[index] = resolvedModality;
+  }
+
+  if (index >= static_cast<int>(m_seriesVolumeCache.size()))
+    m_seriesVolumeCache.resize(m_imageSeriesDirs.size());
+  if (index >= m_seriesWindowValues.size())
+    m_seriesWindowValues.resize(m_imageSeriesDirs.size());
+  if (index >= m_seriesLevelValues.size())
+    m_seriesLevelValues.resize(m_imageSeriesDirs.size());
+  if (index >= m_seriesWindowLevelInitialized.size())
+    m_seriesWindowLevelInitialized.resize(m_imageSeriesDirs.size());
+
+  if (!m_seriesWindowLevelInitialized[index]) {
+    initializeSeriesWindowLevel(index, resolvedPath);
+  }
+
+  double effectiveWindow = window > 0.0 ? window
+                                        : m_seriesWindowValues.value(
+                                              index, m_windowSlider ?
+                                                             m_windowSlider->value()
+                                                             : 256.0);
+  double effectiveLevel = std::isfinite(level)
+                              ? level
+                              : m_seriesLevelValues.value(
+                                    index, m_levelSlider ?
+                                                   m_levelSlider->value()
+                                                   : 128.0);
+
+  m_seriesWindowValues[index] = effectiveWindow;
+  m_seriesLevelValues[index] = effectiveLevel;
+  m_seriesWindowLevelInitialized[index] = true;
+
+  ImageSeriesCacheEntry &entry = m_seriesVolumeCache[index];
+  entry.volume = volume;
+  entry.prepared = true;
+
+  clearFusionPreviewImage();
+
+  bool switched = switchToImageSeries(index);
+  updateImageSeriesButtons();
+  return switched;
+}
+
+void DicomViewer::initializeSegmentationColors() {
+    m_segmentationColors = {
+        QColor(0, 0, 0, 0),         // 0: Background (透明)
+        QColor(255, 0, 0, 128),     // 1: Liver (赤)
+        QColor(0, 255, 0, 128),     // 2: Right Kidney (緑)
+        QColor(0, 0, 255, 128)      // 3: Left Kidney/Spleen (青)
+    };
+    
+    m_segmentationOpacity = 0.5f; // デフォルト不透明度
+}
+/*
+void DicomViewer::drawSegmentationOverlay(QPainter &painter, const QRect &imageRect) {
+    if (!m_segmentationVisible || m_segmentationOverlay.empty()) {
+        return;
+    }
+    
+    try {
+        // 現在表示中のスライスを特定
+        int currentSliceIndex = getCurrentSliceIndex();
+        
+        cv::Mat overlaySlice;
+        if (m_segmentationOverlay.dims == 3) {
+            // 3Dボリュームから現在のスライスを取得
+            if (currentSliceIndex >= 0 && currentSliceIndex < m_segmentationOverlay.size[0]) {
+                overlaySlice = m_segmentationOverlay(cv::Range(currentSliceIndex, currentSliceIndex + 1),
+                                                   cv::Range::all(), cv::Range::all());
+                overlaySlice = overlaySlice.reshape(1, m_segmentationOverlay.size[1]);
+            }
+        } else {
+            // 2Dの場合
+            overlaySlice = m_segmentationOverlay;
+        }
+        
+        if (overlaySlice.empty()) {
+            return;
+        }
+        
+        // セグメンテーションマスクからQImageを作成
+        QImage overlayImage = createSegmentationOverlayImage(overlaySlice, imageRect.size());
+        
+        if (!overlayImage.isNull()) {
+            // 不透明度を適用して描画
+            painter.setOpacity(m_segmentationOpacity);
+            painter.drawImage(imageRect, overlayImage);
+            painter.setOpacity(1.0); // 元に戻す
+        }
+        
+    } catch (const std::exception &e) {
+        qWarning() << "Error drawing segmentation overlay:" << e.what();
+    }
+}
+*/
+
+QImage DicomViewer::createSegmentationOverlayImage(const cv::Mat &segmentation, const QSize &size) {
+    if (segmentation.empty()) {
+        return QImage();
+    }
+    
+    try {
+        // OpenCV MatからQImageへの変換
+        cv::Mat colorOverlay = cv::Mat::zeros(segmentation.size(), CV_8UC4); // RGBA
+        
+        // ラベルごとに色を適用
+        for (int y = 0; y < segmentation.rows; ++y) {
+            for (int x = 0; x < segmentation.cols; ++x) {
+                uchar label = segmentation.at<uchar>(y, x);
+                
+                if (label > 0 && label < m_segmentationColors.size()) {
+                    QColor color = m_segmentationColors[label];
+                    cv::Vec4b &pixel = colorOverlay.at<cv::Vec4b>(y, x);
+                    pixel[0] = color.blue();   // B
+                    pixel[1] = color.green();  // G
+                    pixel[2] = color.red();    // R
+                    pixel[3] = color.alpha();  // A
+                }
+            }
+        }
+        
+        // QImageに変換
+        QImage qImage(colorOverlay.data, colorOverlay.cols, colorOverlay.rows,
+                     colorOverlay.step, QImage::Format_RGBA8888);
+        
+        // サイズ調整
+        if (qImage.size() != size) {
+            qImage = qImage.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        
+        return qImage;
+        
+    } catch (const std::exception &e) {
+        qWarning() << "Error creating overlay image:" << e.what();
+        return QImage();
+    }
+}
+
+int DicomViewer::getCurrentSliceIndex() const {
+    // アクティブビューの現在のスライスインデックスを返す
+    if (m_activeViewIndex >= 0 && m_activeViewIndex < VIEW_COUNT) {
+        return m_currentIndices[m_activeViewIndex];
+    }
+    
+    // フォールバック: 最初のビューのインデックスを返す
+    if (VIEW_COUNT > 0) {
+        return m_currentIndices[0];
+    }
+    
+    // 安全なデフォルト値
+    return 0;
+}
+
+
+#ifdef USE_ONNXRUNTIME
+void DicomViewer::onLoadSegmentationModel() {
+  QString file = QFileDialog::getOpenFileName(
+      this, tr("Open ONNX Model"), QString(), tr("ONNX Model (*.onnx)"));
+  if (file.isEmpty())
+    return;
+  m_segModel = std::make_unique<OnnxSegmenter>();
+  if (!m_segModel->loadModel(file.toStdString())) {
+    QMessageBox::warning(this, tr("Segmentation"),
+                         tr("Failed to load ONNX model."));
+    m_segModel.reset();
+    m_loadedModelLabel->setText(tr("Failed to load model"));
+    m_runSegButton->setEnabled(false);
+  } else {
+    m_loadedModelLabel->setText(QFileInfo(file).fileName());
+    m_runSegButton->setEnabled(true);
+  }
+}
+
+void DicomViewer::applyBoundingBoxToSegmenter() {
+#ifdef USE_ONNXRUNTIME
+  if (!m_segModel || !m_segModel->isLoaded()) {
+    return;
+  }
+  if (!isVolumeLoaded()) {
+    return;
+  }
+
+  int depth = m_volume.depth();
+  int height = m_volume.height();
+  int width = m_volume.width();
+
+  // ✓ RTSSのStructure選択が有効な場合、bounding boxをOnnxSegmenterに設定
+  if (m_useStructureBoundingBox) {
+    // 患者座標系（mm）→ボクセル座標系に変換
+    QVector3D origin(m_volume.originX(), m_volume.originY(), m_volume.originZ());
+    QVector3D spacing(m_volume.spacingX(), m_volume.spacingY(), m_volume.spacingZ());
+
+    int minX = std::max(0, static_cast<int>((m_segBoundingBoxMin.x() - origin.x()) / spacing.x()));
+    int maxX = std::min(width - 1, static_cast<int>((m_segBoundingBoxMax.x() - origin.x()) / spacing.x()));
+    int minY = std::max(0, static_cast<int>((m_segBoundingBoxMin.y() - origin.y()) / spacing.y()));
+    int maxY = std::min(height - 1, static_cast<int>((m_segBoundingBoxMax.y() - origin.y()) / spacing.y()));
+    int minZ = std::max(0, static_cast<int>((m_segBoundingBoxMin.z() - origin.z()) / spacing.z()));
+    int maxZ = std::min(depth - 1, static_cast<int>((m_segBoundingBoxMax.z() - origin.z()) / spacing.z()));
+
+    qDebug() << "[applyBoundingBoxToSegmenter] Setting RTSS Structure bounding box:";
+    qDebug() << "  Patient coords (mm): X[" << m_segBoundingBoxMin.x() << "-" << m_segBoundingBoxMax.x() << "]"
+             << " Y[" << m_segBoundingBoxMin.y() << "-" << m_segBoundingBoxMax.y() << "]"
+             << " Z[" << m_segBoundingBoxMin.z() << "-" << m_segBoundingBoxMax.z() << "]";
+    qDebug() << "  Voxel coords: X[" << minX << "-" << maxX << "] Y[" << minY << "-" << maxY << "] Z[" << minZ << "-" << maxZ << "]";
+
+    m_segModel->setBoundingBoxVoxel(minX, minY, minZ, maxX, maxY, maxZ);
+  } else {
+    // Structure選択なしの場合はbounding boxをクリア
+    m_segModel->clearBoundingBox();
+  }
+#endif
+}
+
+void DicomViewer::onRunSegmentation() {
+  if (!m_segModel || !m_segModel->isLoaded()) {
+    QMessageBox::warning(this, tr("Segmentation"), tr("No model loaded."));
+    return;
+  }
+  if (!isVolumeLoaded()) {
+    QMessageBox::warning(this, tr("Segmentation"), tr("No CT volume loaded."));
+    return;
+  }
+  int depth = m_volume.depth();
+  int height = m_volume.height();
+  int width = m_volume.width();
+  int originalSize[3] = {depth, height, width};
+  m_segmentationVolume.release();
+  m_segLabelList->clear();
+  m_visibleSegLabels.clear();
+  m_segLabelList->setEnabled(false);
+
+  // bounding boxを適用
+  applyBoundingBoxToSegmenter();
+
+  // UI選択から品質モードを取得し、環境変数に設定
+  QString selectedMode = m_segQualityModeCombo->currentData().toString();
+  qputenv("SHIORIS_AI_QUALITY_MODE", selectedMode.toUtf8());
+
+  // 品質モードを取得（環境変数が設定されているので、選択されたモードが返る）
+  std::string qualityMode = m_segModel->getPredictionQualityMode();
+  QString modeText;
+  if (qualityMode == "ultra") {
+    modeText = tr("Running segmentation (ULTRA mode: TTA + Sliding Window)...");
+  } else if (qualityMode == "high") {
+    modeText = tr("Running segmentation (HIGH mode: TTA)...");
+  } else {
+    modeText = tr("Running segmentation (STANDARD mode)...");
+  }
+
+  QProgressDialog progress(modeText, tr("Cancel"), 0, 100, this);
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setMinimumDuration(0);
+  progress.show();
+  QApplication::processEvents();
+
+  // プログレスコールバックを設定
+  m_segModel->setProgressCallback([&progress](float prog, const std::string& message) {
+    int percentage = static_cast<int>(prog * 100.0f);
+    progress.setValue(percentage);
+    if (!message.empty()) {
+      progress.setLabelText(QString::fromStdString(message));
+    }
+    QApplication::processEvents();
+  });
+
+  if (progress.wasCanceled()) {
+    m_segModel->clearProgressCallback();
+    return;
+  }
+
+  // Step 1: ボリューム前処理（計算範囲を保持）
+  cv::Mat prepared = m_segModel->buildInputVolume(m_volume.data());
+  if (prepared.empty()) {
+    m_segModel->clearProgressCallback();
+    QMessageBox::warning(this, tr("Segmentation"),
+                         tr("Failed to build volume for segmentation."));
+    return;
+  }
+
+  // リサンプリング後のサイズを取得
+  int preparedSize[3] = {prepared.size[0], prepared.size[1], prepared.size[2]};
+  qDebug() << "[onRunSegmentation] Prepared volume size:" << preparedSize[0] << "x" << preparedSize[1] << "x" << preparedSize[2];
+
+  // Step 2: 品質モードに応じた推論
+  cv::Mat labels;
+  try {
+    if (qualityMode == "ultra") {
+      // Ultra: TTA + スライディングウィンドウ（preparedSize を使用）
+      const char* overlap_env = std::getenv("SHIORIS_SLIDING_WINDOW_OVERLAP");
+      float overlap = overlap_env ? std::atof(overlap_env) : 0.5f;
+      qDebug() << "[onRunSegmentation] Using ULTRA mode with overlap:" << overlap;
+      labels = m_segModel->predictVolumeUltra(prepared, preparedSize, overlap);
+
+      // 結果を元のサイズにリサンプリング
+      if (!labels.empty()) {
+        qDebug() << "[onRunSegmentation] Resampling result to original size:" << originalSize[0] << "x" << originalSize[1] << "x" << originalSize[2];
+        labels = m_segModel->resample3DToOriginalSize(labels, originalSize);
+      }
+    } else if (qualityMode == "high") {
+      // High: TTA のみ（preparedSize を使用）
+      qDebug() << "[onRunSegmentation] Using HIGH mode (TTA)";
+      labels = m_segModel->predictVolumeWithTTA(prepared, preparedSize);
+
+      // 結果を元のサイズにリサンプリング
+      if (!labels.empty()) {
+        qDebug() << "[onRunSegmentation] Resampling result to original size:" << originalSize[0] << "x" << originalSize[1] << "x" << originalSize[2];
+        labels = m_segModel->resample3DToOriginalSize(labels, originalSize);
+      }
+    } else {
+      // Standard: 通常推論
+      qDebug() << "[onRunSegmentation] Using STANDARD mode";
+      labels = m_segModel->predictVolume(prepared, originalSize);
+    }
+  } catch (const Ort::Exception &e) {
+    m_segModel->clearProgressCallback();
+    QMessageBox::warning(this, tr("Segmentation"),
+                         tr("ONNX runtime error: %1").arg(e.what()));
+    return;
+  } catch (const std::exception &e) {
+    m_segModel->clearProgressCallback();
+    QMessageBox::warning(this, tr("Segmentation"),
+                         tr("Segmentation failed: %1").arg(e.what()));
+    return;
+  }
+
+  m_segModel->clearProgressCallback();
+  if (labels.empty()) {
+    QMessageBox::warning(this, tr("Segmentation"), tr("No segmentation result."));
+    return;
+  }
+
+  QString msg;
+  if (!applySegmentationVolume(labels, &msg)) {
+    QMessageBox::warning(this, tr("Segmentation"),
+                         tr("Failed to apply segmentation result."));
+    return;
+  }
+
+  progress.setValue(1);
+  QMessageBox::information(this, tr("Segmentation"), msg);
+}
+
+QImage DicomViewer::colorizeSegmentationSlice(const cv::Mat &slice) const {
+  QImage overlay(slice.cols, slice.rows, QImage::Format_ARGB32);
+  overlay.fill(Qt::transparent);
+  for (int y = 0; y < slice.rows; ++y) {
+    const unsigned char *src = slice.ptr<unsigned char>(y);
+    QRgb *dst = reinterpret_cast<QRgb *>(overlay.scanLine(y));
+    for (int x = 0; x < slice.cols; ++x) {
+      unsigned char v = src[x];
+      if (v && m_visibleSegLabels.contains(v))
+        dst[x] = labelColor(v);
+      else
+        dst[x] = qRgba(0, 0, 0, 0);
+    }
+  }
+  return overlay;
+}
+
+void DicomViewer::onSegmentationLabelToggled(QListWidgetItem *item) {
+  if (!item)
+    return;
+  int label = item->data(Qt::UserRole).toInt();
+  if (item->checkState() == Qt::Checked)
+    m_visibleSegLabels.insert(label);
+  else
+    m_visibleSegLabels.remove(label);
+  updateImage();
+}
+
+void DicomViewer::onStructureSelectionChanged(int index) {
+  if (index <= 0) {
+    // "None (Full volume)" が選択された場合
+    m_useStructureBoundingBox = false;
+    m_bboxXMinEdit->clear();
+    m_bboxXMaxEdit->clear();
+    m_bboxYMinEdit->clear();
+    m_bboxYMaxEdit->clear();
+    m_bboxZMinEdit->clear();
+    m_bboxZMaxEdit->clear();
+    return;
+  }
+
+  // Structure index (コンボボックスの最初の項目は"None"なので-1する)
+  int roiIndex = index - 1;
+
+  QVector3D minPoint, maxPoint;
+  if (m_rtstruct.roiBoundingBox(roiIndex, minPoint, maxPoint)) {
+    m_useStructureBoundingBox = true;
+    m_segBoundingBoxMin = minPoint;
+    m_segBoundingBoxMax = maxPoint;
+
+    // バウンディングボックスの値を表示
+    m_bboxXMinEdit->setText(QString::number(minPoint.x(), 'f', 2));
+    m_bboxXMaxEdit->setText(QString::number(maxPoint.x(), 'f', 2));
+    m_bboxYMinEdit->setText(QString::number(minPoint.y(), 'f', 2));
+    m_bboxYMaxEdit->setText(QString::number(maxPoint.y(), 'f', 2));
+    m_bboxZMinEdit->setText(QString::number(minPoint.z(), 'f', 2));
+    m_bboxZMaxEdit->setText(QString::number(maxPoint.z(), 'f', 2));
+  } else {
+    m_useStructureBoundingBox = false;
+    QMessageBox::warning(this, tr("Error"),
+                         tr("Failed to get bounding box for the selected structure."));
+  }
+}
+
+void DicomViewer::updateStructureComboBox() {
+  if (!m_structureComboBox)
+    return;
+
+  // コンボボックスをクリアして、最初の項目として"None"を追加
+  m_structureComboBox->clear();
+  m_structureComboBox->addItem(tr("None (Full volume)"));
+
+  // RTSSからStructureを取得してコンボボックスに追加
+  int roiCount = m_rtstruct.roiCount();
+  for (int i = 0; i < roiCount; ++i) {
+    QString roiName = m_rtstruct.roiName(i);
+    m_structureComboBox->addItem(roiName);
+  }
+
+  // デフォルトで"None"を選択
+  m_structureComboBox->setCurrentIndex(0);
+}
+#endif
+
+void DicomViewer::onDoseIsosurfaceClicked() {
+  // Check if dose is loaded
+  if (!m_doseLoaded || m_doseItems.empty()) {
+    QMessageBox::warning(this, tr("3D Isosurface"),
+                        tr("Please load and calculate dose first."));
+    return;
+  }
+
+  // Get active dose volume
+  RTDoseVolume *activeDose = nullptr;
+  for (const auto &item : m_doseItems) {
+    if (item.widget && item.widget->isChecked()) {
+      activeDose = const_cast<RTDoseVolume*>(&item.dose);
+      break;
+    }
+  }
+
+  if (!activeDose || activeDose->data().empty()) {
+    QMessageBox::warning(this, tr("3D Isosurface"),
+                        tr("No active dose volume found."));
+    return;
+  }
+
+  // Create dialog for isodose level selection
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Generate 3D Isosurface"));
+  QVBoxLayout *layout = new QVBoxLayout(&dialog);
+
+  // Check if reference dose is set
+  if (m_doseReference <= 0.0) {
+    QMessageBox::warning(this, tr("3D Isosurface"),
+                        tr("Please set the reference dose (100% =) in the left panel first."));
+    return;
+  }
+
+  // Use reference dose instead of max dose
+  double referenceDoseGy = m_doseReference;
+  QString colormapMode;
+  switch (m_doseDisplayMode) {
+    case DoseResampledVolume::DoseDisplayMode::Colorful:
+      colormapMode = tr("Colorful (HSV)");
+      break;
+    case DoseResampledVolume::DoseDisplayMode::Isodose:
+      colormapMode = tr("Isodose");
+      break;
+    case DoseResampledVolume::DoseDisplayMode::Hot:
+      colormapMode = tr("Hot");
+      break;
+    case DoseResampledVolume::DoseDisplayMode::Simple:
+      colormapMode = tr("Simple (Red)");
+      break;
+    default:
+      colormapMode = tr("Unknown");
+      break;
+  }
+
+  QLabel *infoLabel = new QLabel(tr("Reference Dose (100%%): %1 Gy | Colormap: %2")
+                                  .arg(referenceDoseGy, 0, 'f', 2)
+                                  .arg(colormapMode));
+  layout->addWidget(infoLabel);
+
+  // Isodose level input (percentage-based)
+  QGroupBox *levelGroup = new QGroupBox(tr("Isodose Levels (%)"));
+  QVBoxLayout *levelLayout = new QVBoxLayout(levelGroup);
+
+  QLineEdit *levelsEdit = new QLineEdit("10, 30, 50, 70, 90, 100");
+  levelsEdit->setPlaceholderText(tr("Enter percentage levels separated by commas"));
+  levelLayout->addWidget(new QLabel(tr("Dose values (% of reference dose):")));
+  levelLayout->addWidget(levelsEdit);
+  layout->addWidget(levelGroup);
+
+  // Opacity control
+  QHBoxLayout *opacityLayout = new QHBoxLayout();
+  opacityLayout->addWidget(new QLabel(tr("Maximum Opacity (高線量):")));
+  QSlider *opacitySlider = new QSlider(Qt::Horizontal);
+  opacitySlider->setRange(10, 100);
+  opacitySlider->setValue(50);
+  QLabel *opacityValueLabel = new QLabel("50%");
+  connect(opacitySlider, &QSlider::valueChanged, [opacityValueLabel](int value) {
+    opacityValueLabel->setText(QString("%1%").arg(value));
+  });
+  opacityLayout->addWidget(opacitySlider);
+  opacityLayout->addWidget(opacityValueLabel);
+  layout->addLayout(opacityLayout);
+
+  // Add explanation label for automatic opacity scaling
+  QLabel *explanationLabel = new QLabel(tr("※ 高線量ほど自動的に不透明度が高くなります（最小20%～最大上記設定値）"));
+  explanationLabel->setWordWrap(true);
+  explanationLabel->setStyleSheet("color: #666; font-size: 10pt;");
+  layout->addWidget(explanationLabel);
+
+  // Buttons
+  QDialogButtonBox *buttonBox = new QDialogButtonBox(
+      QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  layout->addWidget(buttonBox);
+
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+
+  // Parse isodose levels (percentage values)
+  QStringList levelStrings = levelsEdit->text().split(',', Qt::SkipEmptyParts);
+  QVector<double> levels;  // Dose levels in Gy
+  for (const QString &str : levelStrings) {
+    bool ok;
+    double percentValue = str.trimmed().toDouble(&ok);
+    if (ok && percentValue > 0.0 && percentValue <= 200.0) {  // Allow up to 200%
+      // Convert percentage to Gy using reference dose
+      double doseGy = (percentValue / 100.0) * referenceDoseGy;
+      levels.append(doseGy);
+    }
+  }
+
+  if (levels.isEmpty()) {
+    QMessageBox::warning(this, tr("3D Isosurface"),
+                        tr("No valid isodose levels entered.\nPlease enter percentage values (e.g., 10, 30, 50, 70, 90, 100)."));
+    return;
+  }
+
+  float opacity = opacitySlider->value() / 100.0f;
+
+  // Generate isosurfaces
+  m_doseIsosurfaces.clear();
+  QProgressDialog progress(tr("Generating isosurfaces..."), tr("Cancel"), 0, levels.size(), this);
+  progress.setWindowModality(Qt::WindowModal);
+
+  // Determine min and max dose levels for automatic opacity scaling
+  QVector<double> sortedLevels = levels;
+  std::sort(sortedLevels.begin(), sortedLevels.end());
+  double minLevel = sortedLevels.first();
+  double maxLevel = sortedLevels.last();
+
+  for (int i = 0; i < levels.size(); ++i) {
+    if (progress.wasCanceled())
+      break;
+
+    progress.setValue(i);
+    QApplication::processEvents();
+
+    DoseIsosurface surface;
+
+    // Use colormap-based color instead of predefined palette
+    QColor doseColor = getDoseColor(levels[i], referenceDoseGy);
+    surface.setColor(doseColor);
+
+    // Automatic opacity scaling: higher dose = higher opacity
+    float calculatedOpacity;
+    if (maxLevel > minLevel) {
+      // Linear interpolation based on dose level
+      // Minimum opacity: 20%, Maximum opacity: user-defined value
+      float ratio = (levels[i] - minLevel) / (maxLevel - minLevel);
+      calculatedOpacity = 0.2f + ratio * (opacity - 0.2f);
+    } else {
+      // If only one dose level, use user-defined opacity
+      calculatedOpacity = opacity;
+    }
+    surface.setOpacity(calculatedOpacity);
+
+    // Get direction cosines (use identity if not available)
+    double rowDir[3] = {1.0, 0.0, 0.0};
+    double colDir[3] = {0.0, 1.0, 0.0};
+    double sliceDir[3] = {0.0, 0.0, 1.0};
+
+    // Generate mesh using Marching Cubes
+    surface.generateIsosurface(
+        activeDose->data(),
+        levels[i],
+        activeDose->originX(),
+        activeDose->originY(),
+        activeDose->originZ(),
+        activeDose->spacingX(),
+        activeDose->spacingY(),
+        activeDose->spacingZ(),
+        rowDir,
+        colDir,
+        sliceDir
+    );
+
+    // 患者座標系から3Dウィジェット座標系に変換
+    if (!surface.isEmpty()) {
+      surface.transformTo3DWidgetSpace(m_volume);
+      m_doseIsosurfaces.append(surface);
+    }
+  }
+
+  progress.setValue(levels.size());
+
+  // Update 3D view
+  for (int i = 0; i < VIEW_COUNT; ++i) {
+    if (m_3dWidgets[i]) {
+      m_3dWidgets[i]->setDoseIsosurfaces(m_doseIsosurfaces);
+    }
+  }
+
+  QMessageBox::information(this, tr("3D Isosurface"),
+                          tr("Generated %1 isosurface(s) with %2 total triangles.")
+                          .arg(m_doseIsosurfaces.size())
+                          .arg(std::accumulate(m_doseIsosurfaces.begin(), m_doseIsosurfaces.end(), 0,
+                               [](int sum, const DoseIsosurface &s) { return sum + s.triangleCount(); })));
+}
+
+void DicomViewer::onExportButtonClicked(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= VIEW_COUNT) {
+    qWarning() << "Invalid view index for export:" << viewIndex;
+    return;
+  }
+
+  if (!m_is3DView[viewIndex]) {
+    qWarning() << "Export button clicked but view is not 3D:" << viewIndex;
+    return;
+  }
+
+  if (!m_3dWidgets[viewIndex]) {
+    qWarning() << "3D widget not available for export:" << viewIndex;
+    return;
+  }
+
+  // Get 3D data from OpenGL widget
+  const StructureLine3DList& structureLines = m_3dWidgets[viewIndex]->getStructureLines();
+  const QVector<DoseIsosurface>& isosurfaces = m_3dWidgets[viewIndex]->getDoseIsosurfaces();
+
+  // Check if there's any data to export
+  if (structureLines.isEmpty() && isosurfaces.isEmpty()) {
+    QMessageBox::information(this, tr("Export USDZ"),
+                            tr("No 3D data available to export.\n\n"
+                               "Please load RT Structure contours or generate dose isosurfaces first."));
+    return;
+  }
+
+  // Show file save dialog
+  QString defaultFileName = "ShioRIS3_Export.usdz";
+  if (!m_ctFilename.isEmpty()) {
+    QFileInfo ctInfo(m_ctFilename);
+    defaultFileName = ctInfo.completeBaseName() + "_3D.usdz";
+  }
+
+  QString filename = QFileDialog::getSaveFileName(
+      this,
+      tr("Export 3D Data to USDZ for Vision Pro"),
+      defaultFileName,
+      tr("USDZ Files (*.usdz);;All Files (*)")
+  );
+
+  if (filename.isEmpty()) {
+    return; // User cancelled
+  }
+
+  // Ensure .usdz extension
+  if (!filename.endsWith(".usdz", Qt::CaseInsensitive)) {
+    filename += ".usdz";
+  }
+
+  // Get CT volume data if available
+  const DicomVolume* ctVolumePtr = isVolumeLoaded() ? &m_volume : nullptr;
+
+  // Get window/level settings for CT display from UI controls
+  double ctWindow = 400.0;
+  double ctLevel = 40.0;
+  if (m_windowSpinBox && m_levelSpinBox) {
+    ctWindow = m_windowSpinBox->value();
+    ctLevel = m_levelSpinBox->value();
+  }
+
+  // Get current slice indices for Axial, Sagittal, Coronal
+  // m_orientationIndices[0] = Axial, [1] = Sagittal, [2] = Coronal
+  int axialIndex = m_orientationIndices[0];
+  int sagittalIndex = m_orientationIndices[1];
+  int coronalIndex = m_orientationIndices[2];
+
+  // Export using USDZ exporter
+  USDZExporter exporter;
+  bool success = exporter.exportToUSDZ(filename, structureLines, isosurfaces,
+                                       ctVolumePtr, ctWindow, ctLevel,
+                                       axialIndex, sagittalIndex, coronalIndex);
+
+  if (success) {
+    QString exportedData;
+    if (ctVolumePtr) {
+      // Count how many slices are actually exported
+      int numSlices = 0;
+      if (axialIndex >= 0 && axialIndex < ctVolumePtr->depth()) numSlices++;
+      if (sagittalIndex >= 0 && sagittalIndex < ctVolumePtr->width()) numSlices++;
+      if (coronalIndex >= 0 && coronalIndex < ctVolumePtr->height()) numSlices++;
+
+      exportedData = tr("Exported data includes:\n"
+                       "- %1 CT image slice(s) (Axial, Sagittal, Coronal)\n"
+                       "- %2 RT Structure contour(s)\n"
+                       "- %3 Dose isosurface(s)")
+                       .arg(numSlices)
+                       .arg(structureLines.size())
+                       .arg(isosurfaces.size());
+    } else {
+      exportedData = tr("Exported data includes:\n"
+                       "- %1 RT Structure contour(s)\n"
+                       "- %2 Dose isosurface(s)")
+                       .arg(structureLines.size())
+                       .arg(isosurfaces.size());
+    }
+
+    QMessageBox::information(this, tr("Export Successful"),
+                            tr("3D data exported successfully to:\n%1\n\n"
+                               "You can now view this file on Vision Pro or other AR/VR devices.\n\n"
+                               "%2")
+                            .arg(filename)
+                            .arg(exportedData));
+  } else {
+    QMessageBox::warning(this, tr("Export Failed"),
+                        tr("Failed to export 3D data to USDZ file.\n\n"
+                           "Please check:\n"
+                           "- Write permission to the output directory\n"
+                           "- Disk space availability\n"
+                           "- System 'zip' command is available (for best compatibility)"));
+  }
+}
+
+// moc ファイルのインクルード（cpp内にQ_OBJECTがあるため）
+#include "dicom_viewer.moc"

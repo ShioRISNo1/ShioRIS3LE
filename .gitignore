@@ -1,0 +1,7 @@
+build/*
+
+# SSL certificates and private keys (should not be committed)
+ssl_certs/
+*.key
+*.crt
+*.pem
