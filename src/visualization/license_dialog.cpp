@@ -181,23 +181,6 @@ QString LicenseDialog::generateLicenseInfo()
     html += "<p class='note'>Note: Used when AI features are enabled.</p>";
     html += "</div>";
 
-    // OpenCL
-    html += "<div class='library'>";
-    html += "<h3>OpenCL</h3>";
-    html += "<p><span class='license-type'>License:</span> Apache License 2.0</p>";
-    html += "<p>OpenCL is a framework for parallel programming across heterogeneous platforms.</p>";
-    html += "<p>Website: <a href='https://www.khronos.org/opencl/'>https://www.khronos.org/opencl/</a></p>";
-    html += "<p class='note'>Note: Used when GPU acceleration is enabled.</p>";
-    html += "</div>";
-
-    // Metal (macOS)
-    html += "<div class='library'>";
-    html += "<h3>Metal Framework</h3>";
-    html += "<p><span class='license-type'>License:</span> Apple SDK License</p>";
-    html += "<p>Metal is a low-level graphics API for Apple platforms.</p>";
-    html += "<p class='note'>Note: Used on macOS when GPU acceleration is enabled.</p>";
-    html += "</div>";
-
     // QCustomPlot
     html += "<div class='library'>";
     html += "<h3>QCustomPlot</h3>";

@@ -10,10 +10,6 @@
 #include <functional>
 #include <QMatrix4x4>
 
-namespace CyberKnife {
-class CyberKnifeDoseCalculator;
-}
-
 class RTDoseVolume
 {
 public:
@@ -176,7 +172,6 @@ public:
     QImage createDebugGridOverlay(const DicomVolume& refVol, int index,DicomVolume::Orientation ori) const;
 
 private:
-    friend class CyberKnife::CyberKnifeDoseCalculator;
     // トリリニア補間ヘルパー
     float interpolateTrilinear(double x, double y, double z) const;
 

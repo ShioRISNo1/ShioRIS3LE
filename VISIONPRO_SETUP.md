@@ -356,7 +356,6 @@ m_webServer->start(port, useSSL);
 
 ### Phase 2: インタラクション強化（優先度: 中）
 - [ ] ハンドトラッキングによるROI描画
-- [ ] CyberKnifeビームの空間配置
 - [ ] リアルタイム線量計算の統合
 - [ ] 音声コマンド統合（既存のWhisper統合を活用）
 

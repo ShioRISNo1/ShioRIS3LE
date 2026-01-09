@@ -28,7 +28,6 @@
 #include "data/metadata_generator.h"
 #include "visualization/data_window.h"
 #include "visualization/fusion_dialog.h"
-#include "cyberknife/dose_calculator.h"
 #include "theme_manager.h"
 
 class MainWindow : public QMainWindow
@@ -45,8 +44,6 @@ private slots:
     void openDicomVolume();
     void openRTDoseFile();
     void openRTStructFile();
-    void loadCyberKnifeBeamData();
-    void exportCyberKnifeCsvBundle();
     void exitApplication();
     void aboutApplication();
     void onImageLoaded(const QString& filename);
@@ -64,12 +61,10 @@ private:
     void setupUI();
     void setupMenus();
     void setupStatusBar();
-    void initializeCyberKnifeDoseCalculator();
     void updateWindowTitle(const QString& filename = QString());
     void showDataWindow();
 
     QString getVolumeInfoString();
-    void updateCyberKnifeExportActions();
     void updateTextThemeSelection(ThemeManager::TextTheme theme);
 
     // UI components
@@ -78,8 +73,6 @@ private:
     // Menus
     QMenuBar* m_menuBar;
     QMenu* m_fileMenu;
-    QMenu* m_cyberKnifeExportMenu{nullptr};
-    QMenu* m_cyberKnifeMenu{nullptr};
     QMenu* m_appearanceMenu{nullptr};
     QMenu* m_textColorMenu{nullptr};
     QMenu* m_databaseMenu;
@@ -91,8 +84,6 @@ private:
     QAction* m_openVolumeAction;
     QAction* m_openRTDoseAction;
     QAction* m_openRTStructAction;
-    QAction* m_loadCyberKnifeBeamDataAction;
-    QAction* m_exportCyberKnifeCsvAction{nullptr};
     QAction* m_exitAction;
     QAction* m_aboutAction;
     QAction* m_openDataWindowAction;
@@ -113,7 +104,6 @@ private:
     QLabel* m_windowLevelLabel;
     QLabel* m_zoomLabel;
     QProgressBar* m_progressBar;
-    QLabel* m_cyberKnifeStatusLabel{nullptr};
 
     VolumeViewerWindow* m_volumeWindow;
     DataWindow* m_dataWindow{nullptr};
@@ -127,7 +117,6 @@ private:
     DatabaseSyncManager* m_syncManager{nullptr};
     MetadataGenerator m_metadata{m_dbManager};
 
-    CyberKnife::CyberKnifeDoseCalculator m_cyberKnifeDoseCalculator;
 };
 
 #endif // MAINWINDOW_H

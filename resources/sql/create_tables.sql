@@ -79,18 +79,6 @@ CREATE TABLE IF NOT EXISTS change_log (
     details TEXT
 );
 
--- CyberKnife beam data table
-CREATE TABLE IF NOT EXISTS CyberKnifeBeamData (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    data_type TEXT NOT NULL,
-    collimator_size REAL,
-    depth REAL,
-    radius REAL,
-    factor_value REAL NOT NULL,
-    file_source TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
 -- Dose volumes table for tracking saved dose distributions
 CREATE TABLE IF NOT EXISTS dose_volumes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -186,98 +186,6 @@ if(APPLE)
     add_definitions(-DDCMTK_HAVE_STD_NAMESPACE)
 endif()
 
-# ===== GPU Dose Calculation 設定 =====
-option(ENABLE_GPU_DOSE_CALCULATION "Enable GPU-accelerated dose calculation" ON)
-
-if(ENABLE_GPU_DOSE_CALCULATION)
-    message(STATUS "=== GPU Dose Calculation Configuration ===")
-
-    set(GPU_BACKEND_FOUND FALSE)
-
-    # Metal (macOS only - recommended for Apple Silicon)
-    if(APPLE)
-        find_library(METAL_FRAMEWORK Metal)
-        find_library(FOUNDATION_FRAMEWORK Foundation)
-        if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
-            message(STATUS "✓ Metal framework found")
-            set(GPU_BACKEND_METAL TRUE)
-            set(GPU_BACKEND_FOUND TRUE)
-            message(STATUS "  Metal Framework: ${METAL_FRAMEWORK}")
-        else()
-            message(STATUS "✗ Metal framework not found")
-            set(GPU_BACKEND_METAL FALSE)
-        endif()
-    else()
-        set(GPU_BACKEND_METAL FALSE)
-    endif()
-
-    # CUDA (NVIDIA GPUs - best performance for RTX series)
-    if(NOT APPLE)
-        include(CheckLanguage)
-        check_language(CUDA)
-        if(CMAKE_CUDA_COMPILER)
-            enable_language(CUDA)
-            find_package(CUDAToolkit)
-            if(CUDAToolkit_FOUND)
-                message(STATUS "✓ CUDA Toolkit found: ${CUDAToolkit_VERSION}")
-                set(GPU_BACKEND_CUDA TRUE)
-                set(GPU_BACKEND_FOUND TRUE)
-                message(STATUS "  CUDA Toolkit Root: ${CUDAToolkit_INCLUDE_DIRS}")
-                message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
-
-                # Set CUDA architecture for RTX 3090 (Compute Capability 8.6)
-                # Also support other common architectures
-                if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-                    set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89" CACHE STRING "CUDA architectures")
-                    message(STATUS "  CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
-                endif()
-            else()
-                message(STATUS "✗ CUDA Toolkit not found")
-                set(GPU_BACKEND_CUDA FALSE)
-            endif()
-        else()
-            message(STATUS "✗ CUDA compiler not found")
-            set(GPU_BACKEND_CUDA FALSE)
-        endif()
-    else()
-        set(GPU_BACKEND_CUDA FALSE)
-    endif()
-
-    # OpenCL (Windows/Linux/macOS fallback)
-    find_package(OpenCL)
-    if(OpenCL_FOUND)
-        message(STATUS "✓ OpenCL found: ${OpenCL_VERSION_STRING}")
-        set(GPU_BACKEND_OPENCL TRUE)
-        set(GPU_BACKEND_FOUND TRUE)
-        message(STATUS "  OpenCL Include: ${OpenCL_INCLUDE_DIRS}")
-        message(STATUS "  OpenCL Library: ${OpenCL_LIBRARIES}")
-    else()
-        message(STATUS "✗ OpenCL not found")
-        set(GPU_BACKEND_OPENCL FALSE)
-    endif()
-
-    if(GPU_BACKEND_FOUND)
-        if(GPU_BACKEND_CUDA)
-            message(STATUS "✓ GPU dose calculation enabled with CUDA backend (primary - NVIDIA)")
-        endif()
-        if(GPU_BACKEND_METAL)
-            message(STATUS "✓ GPU dose calculation enabled with Metal backend (primary - Apple)")
-        endif()
-        if(GPU_BACKEND_OPENCL)
-            if(APPLE)
-                message(STATUS "  OpenCL backend available (fallback - deprecated on macOS)")
-            elseif(GPU_BACKEND_CUDA)
-                message(STATUS "  OpenCL backend available (fallback - CUDA preferred for NVIDIA)")
-            else()
-                message(STATUS "✓ GPU dose calculation enabled with OpenCL backend")
-            endif()
-        endif()
-    else()
-        message(WARNING "No GPU backend available. GPU dose calculation will be disabled.")
-        set(ENABLE_GPU_DOSE_CALCULATION OFF)
-    endif()
-endif()
-
 # DCMTK設定（既存の設定を保持）
 set(DCMTK_INCLUDE_DIRS_PRIVATE "")
 
@@ -364,21 +272,9 @@ set(HEADERS
     include/data/file_structure_manager.h
     include/data/multi_modality_manager.h
     include/data/metadata_generator.h
-    include/cyberknife/beam_data_parser.h
-    include/cyberknife/beam_data_locator.h
-    include/cyberknife/beam_data_manager.h
-    include/cyberknife/geometry_calculator.h
-    include/cyberknife/dose_calculator.h
-    include/cyberknife/gpu_dose_backend.h
-    include/cyberknife/opencl_dose_backend.h
     include/web/web_server.h
     include/export/usdz_exporter.h
 )
-
-# Add Metal backend header on macOS
-if(APPLE AND GPU_BACKEND_METAL)
-    list(APPEND HEADERS include/cyberknife/metal_dose_backend.h)
-endif()
 
 set(SOURCES
     src/main.cpp
@@ -419,37 +315,15 @@ set(SOURCES
     src/data/file_structure_manager.cpp
     src/data/multi_modality_manager.cpp
     src/data/metadata_generator.cpp
-    src/cyberknife/beam_data_parser.cpp
-    src/cyberknife/beam_data_locator.cpp
-    src/cyberknife/beam_data_manager.cpp
-    src/cyberknife/geometry_calculator.cpp
-    src/cyberknife/dose_calculator.cpp
-    src/cyberknife/gpu_dose_backend.cpp
-    src/cyberknife/opencl_dose_backend.cpp
     src/web/web_server.cpp
     src/export/usdz_exporter.cpp
 )
-
-# Add Metal backend implementation on macOS
-if(APPLE AND GPU_BACKEND_METAL)
-    list(APPEND SOURCES src/cyberknife/metal_dose_backend.mm)
-endif()
 
 # Add macOS audio permissions implementation
 if(APPLE)
     list(APPEND SOURCES src/platform/macos_audio_permissions.mm)
 endif()
 
-# Add CUDA backend implementation on Linux/Windows with NVIDIA GPUs
-if(GPU_BACKEND_CUDA)
-    list(APPEND HEADERS include/cyberknife/cuda_dose_backend.h)
-    list(APPEND HEADERS include/cyberknife/multi_gpu_cuda_manager.h)
-    list(APPEND SOURCES
-        src/cyberknife/cuda_dose_backend.cu
-        src/cyberknife/multi_gpu_cuda_manager.cpp
-    )
-    # Note: cuda_kernels.cu is included directly in cuda_dose_backend.cu
-endif()
 
 # リソースファイル
 set(RESOURCES
@@ -515,83 +389,6 @@ endif()
 
 if(APPLE)
     strip_agl_from_target(ShioRIS3)
-endif()
-
-# GPU Dose Calculation用のリンク設定
-if(ENABLE_GPU_DOSE_CALCULATION)
-    target_compile_definitions(ShioRIS3 PRIVATE
-        ENABLE_GPU_DOSE_CALCULATION
-        SHIORIS_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-    )
-
-    # Metal backend (macOS)
-    if(GPU_BACKEND_METAL)
-        target_link_libraries(ShioRIS3 PRIVATE ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
-        target_compile_definitions(ShioRIS3 PRIVATE USE_METAL_BACKEND)
-        message(STATUS "✓ GPU dose calculation: Metal backend linked")
-        message(STATUS "  Metal Framework: ${METAL_FRAMEWORK}")
-        message(STATUS "  Foundation Framework: ${FOUNDATION_FRAMEWORK}")
-
-        # Copy Metal shader file to bundle Resources on macOS
-        if(APPLE)
-            add_custom_command(TARGET ShioRIS3 POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                    "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Resources"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${CMAKE_SOURCE_DIR}/src/cyberknife/metal_kernels.metal"
-                    "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Resources/metal_kernels.metal"
-                COMMENT "Copying Metal shader to app bundle"
-            )
-        endif()
-    endif()
-
-    # OpenCL backend (cross-platform)
-    if(GPU_BACKEND_OPENCL)
-        target_include_directories(ShioRIS3 PRIVATE ${OpenCL_INCLUDE_DIRS})
-        target_link_libraries(ShioRIS3 PRIVATE ${OpenCL_LIBRARIES})
-        target_compile_definitions(ShioRIS3 PRIVATE USE_OPENCL_BACKEND)
-
-        if(APPLE AND GPU_BACKEND_METAL)
-            message(STATUS "✓ GPU dose calculation: OpenCL backend linked (fallback)")
-        else()
-            message(STATUS "✓ GPU dose calculation: OpenCL backend linked")
-        endif()
-        message(STATUS "  OpenCL Libraries: ${OpenCL_LIBRARIES}")
-
-        # Copy OpenCL kernel file to build directory
-        if(APPLE)
-            add_custom_command(TARGET ShioRIS3 POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${CMAKE_SOURCE_DIR}/src/cyberknife/opencl_kernels.cl"
-                    "$<TARGET_BUNDLE_DIR:ShioRIS3>/Contents/Resources/opencl_kernels.cl"
-                COMMENT "Copying OpenCL kernel to app bundle"
-            )
-        else()
-            add_custom_command(TARGET ShioRIS3 POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${CMAKE_SOURCE_DIR}/src/cyberknife/opencl_kernels.cl"
-                    "$<TARGET_FILE_DIR:ShioRIS3>/opencl_kernels.cl"
-                COMMENT "Copying OpenCL kernel to build directory"
-            )
-        endif()
-    endif()
-
-    # CUDA backend (NVIDIA GPUs - Linux/Windows)
-    if(GPU_BACKEND_CUDA)
-        target_compile_definitions(ShioRIS3 PRIVATE USE_CUDA_BACKEND)
-        target_link_libraries(ShioRIS3 PRIVATE CUDA::cudart CUDA::cuda_driver)
-
-        # Set CUDA properties for target
-        set_target_properties(ShioRIS3 PROPERTIES
-            CUDA_SEPARABLE_COMPILATION ON
-            CUDA_RESOLVE_DEVICE_SYMBOLS ON
-        )
-
-        message(STATUS "✓ GPU dose calculation: CUDA backend linked")
-        message(STATUS "  CUDA Runtime: CUDA::cudart")
-        message(STATUS "  CUDA Driver: CUDA::cuda_driver")
-        message(STATUS "  CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
-    endif()
 endif()
 
 # Core5Compatが利用可能な場合のみリンク
