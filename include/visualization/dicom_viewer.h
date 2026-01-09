@@ -680,7 +680,6 @@ private:
       nullptr}; // 各ビューの方向変更ボタン
   QPushButton *m_imageToggleButtons[VIEW_COUNT]{nullptr}; // 3D画像表示切り替えボタン
   QPushButton *m_lineToggleButtons[VIEW_COUNT]{nullptr}; // 3D Structure Line表示切り替えボタン
-  QPushButton *m_surfaceToggleButtons[VIEW_COUNT]{nullptr}; // 3D Structure Surface表示切り替えボタン
   QPushButton *m_exportButtons[VIEW_COUNT]{nullptr}; // 3D VisionPro USDZ export buttons
   QPushButton *m_imageSeriesButtons[VIEW_COUNT]{nullptr};
   QPushButton *m_viewWindowLevelButtons[VIEW_COUNT]{nullptr};
@@ -688,7 +687,6 @@ private:
   QPushButton *m_viewZoomButtons[VIEW_COUNT]{nullptr};
   bool m_show3DImages[VIEW_COUNT]{true}; // 3D view CT image visibility
   bool m_show3DLines[VIEW_COUNT]{true};  // 3D view slice line visibility
-  bool m_show3DSurfaces[VIEW_COUNT]{true};  // 3D view structure surface visibility
   QVector<StructureSurface> m_cachedStructureSurfaces;
   bool m_structureSurfacesDirty{true};
   QStringList m_imageSeriesDirs;
@@ -712,7 +710,6 @@ private:
   void onViewZoomToggled(int viewIndex, bool checked);
   void onImageToggleClicked(int viewIndex);
   void onLineToggleClicked(int viewIndex);
-  void onSurfaceToggleClicked(int viewIndex);
   QVector<double> m_seriesWindowValues;
   QVector<double> m_seriesLevelValues;
   QVector<bool> m_seriesWindowLevelInitialized;
