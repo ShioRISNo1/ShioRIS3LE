@@ -278,213 +278,6 @@ if(ENABLE_GPU_DOSE_CALCULATION)
     endif()
 endif()
 
-# ===== ONNX Runtime 設定 =====
-option(ENABLE_ONNXRUNTIME "Enable ONNX Runtime for AI functionality" ON)
-
-if(ENABLE_ONNXRUNTIME)
-    message(STATUS "=== ONNX Runtime Detection ===")
-    
-    if(APPLE)
-        # macOS設定（既存の設定を保持）
-        if(DEFINED ENV{ONNXRUNTIME_ROOT})
-            set(ONNXRUNTIME_ROOT_PATH $ENV{ONNXRUNTIME_ROOT})
-            message(STATUS "Using ONNXRUNTIME_ROOT: ${ONNXRUNTIME_ROOT_PATH}")
-        else()
-            set(ONNXRUNTIME_ROOT_PATH "/opt/homebrew/onnxruntime")
-            message(STATUS "Using default path: ${ONNXRUNTIME_ROOT_PATH}")
-        endif()
-        
-        if(EXISTS "${ONNXRUNTIME_ROOT_PATH}")
-            set(ONNXRUNTIME_INCLUDE_DIRS "${ONNXRUNTIME_ROOT_PATH}/include")
-            if(EXISTS "${ONNXRUNTIME_INCLUDE_DIRS}/onnxruntime_cxx_api.h")
-                message(STATUS "Headers found: ${ONNXRUNTIME_INCLUDE_DIRS}")
-                
-                set(ONNXRUNTIME_LIB "${ONNXRUNTIME_ROOT_PATH}/lib/libonnxruntime.dylib")
-                if(EXISTS "${ONNXRUNTIME_LIB}")
-                    message(STATUS "Library found: ${ONNXRUNTIME_LIB}")
-                    set(ONNXRUNTIME_FOUND TRUE)
-                else()
-                    message(WARNING "ONNX Runtime library not found: ${ONNXRUNTIME_LIB}")
-                    set(ONNXRUNTIME_FOUND FALSE)
-                endif()
-            else()
-                message(WARNING "ONNX Runtime headers not found")
-                set(ONNXRUNTIME_FOUND FALSE)
-            endif()
-        else()
-            message(WARNING "ONNX Runtime directory not found: ${ONNXRUNTIME_ROOT_PATH}")
-            set(ONNXRUNTIME_FOUND FALSE)
-        endif()
-        
-    elseif(UNIX AND NOT APPLE) # Linux設定
-        message(STATUS "Configuring ONNX Runtime for Linux...")
-        
-        # 複数のパスを試行
-        set(POTENTIAL_ONNX_PATHS
-            "/usr/local/onnxruntime"
-            "/opt/onnxruntime"
-            "/usr/share/onnxruntime"
-            "$ENV{HOME}/onnxruntime"
-        )
-        
-        # 環境変数が設定されている場合は最優先
-        if(DEFINED ENV{ONNXRUNTIME_ROOT})
-            list(INSERT POTENTIAL_ONNX_PATHS 0 $ENV{ONNXRUNTIME_ROOT})
-        endif()
-        
-        set(ONNXRUNTIME_FOUND FALSE)
-        foreach(ONNX_PATH ${POTENTIAL_ONNX_PATHS})
-            message(STATUS "Checking ONNX Runtime path: ${ONNX_PATH}")
-            
-            if(EXISTS "${ONNX_PATH}")
-                # ヘッダーファイル確認
-                set(ONNX_INCLUDE_PATH "${ONNX_PATH}/include")
-                if(EXISTS "${ONNX_INCLUDE_PATH}/onnxruntime_cxx_api.h")
-                    message(STATUS "✓ Headers found: ${ONNX_INCLUDE_PATH}")
-                    
-                    # ライブラリファイル確認（複数の可能性）
-                    set(POTENTIAL_LIBS
-                        "${ONNX_PATH}/lib/libonnxruntime.so"
-                        "${ONNX_PATH}/lib64/libonnxruntime.so"
-                        "${ONNX_PATH}/lib/x86_64-linux-gnu/libonnxruntime.so"
-                    )
-                    
-                    foreach(LIB_PATH ${POTENTIAL_LIBS})
-                        if(EXISTS "${LIB_PATH}")
-                            message(STATUS "✓ Library found: ${LIB_PATH}")
-                            set(ONNXRUNTIME_ROOT_PATH ${ONNX_PATH})
-                            set(ONNXRUNTIME_INCLUDE_DIRS ${ONNX_INCLUDE_PATH})
-                            set(ONNXRUNTIME_LIB ${LIB_PATH})
-                            set(ONNXRUNTIME_FOUND TRUE)
-                            break()
-                        endif()
-                    endforeach()
-                    
-                    if(ONNXRUNTIME_FOUND)
-                        break()
-                    endif()
-                endif()
-            endif()
-        endforeach()
-        
-        # pkg-config を使用した検索
-        if(NOT ONNXRUNTIME_FOUND)
-            message(STATUS "Trying pkg-config for ONNX Runtime...")
-            find_package(PkgConfig QUIET)
-            if(PkgConfig_FOUND)
-                pkg_check_modules(ONNXRUNTIME QUIET libonnxruntime)
-                if(ONNXRUNTIME_FOUND)
-                    message(STATUS "✓ Found ONNX Runtime via pkg-config")
-                    set(ONNXRUNTIME_INCLUDE_DIRS ${ONNXRUNTIME_INCLUDE_DIRS})
-                    set(ONNXRUNTIME_LIB ${ONNXRUNTIME_LIBRARIES})
-                endif()
-            endif()
-        endif()
-        
-        # CUDA対応の確認
-        if(ONNXRUNTIME_FOUND)
-            message(STATUS "Checking CUDA availability...")
-
-            # CUDA 12.0対応の検出方法
-            find_package(CUDAToolkit QUIET)
-            if(CUDAToolkit_FOUND)
-                message(STATUS "✓ CUDA Toolkit found: Version ${CUDAToolkit_VERSION}")
-
-                # まず初期値をFALSEに設定
-                set(ONNXRUNTIME_USE_CUDA FALSE)
-
-                # 既存のCUDA EPライブラリの探索ロジック
-                set(POTENTIAL_CUDA_LIBS
-                    "/usr/local/onnxruntime/lib/libonnxruntime_providers_cuda.so"
-                    "${ONNXRUNTIME_ROOT_PATH}/lib/libonnxruntime_providers_cuda.so"
-                    "${ONNXRUNTIME_ROOT_PATH}/lib64/libonnxruntime_providers_cuda.so"
-                    "${ONNXRUNTIME_ROOT_PATH}/lib/x86_64-linux-gnu/libonnxruntime_providers_cuda.so"
-                    "/opt/onnxruntime/lib/libonnxruntime_providers_cuda.so"
-                )
-
-                foreach(CUDA_LIB ${POTENTIAL_CUDA_LIBS})
-                    if(EXISTS "${CUDA_LIB}")
-                        message(STATUS "✓ CUDA provider library found: ${CUDA_LIB}")
-                        set(ONNXRUNTIME_CUDA_LIB ${CUDA_LIB})
-                        set(ONNXRUNTIME_USE_CUDA TRUE)
-
-                        # Shared providerライブラリの確認
-                        get_filename_component(CUDA_LIB_DIR "${CUDA_LIB}" DIRECTORY)
-                        set(POTENTIAL_SHARED_LIBS
-                            "${CUDA_LIB_DIR}/libonnxruntime_providers_shared.so"
-                        )
-                        foreach(SHARED_LIB ${POTENTIAL_SHARED_LIBS})
-                            if(EXISTS "${SHARED_LIB}")
-                                message(STATUS "✓ Shared provider library found: ${SHARED_LIB}")
-                                set(ONNXRUNTIME_SHARED_LIB ${SHARED_LIB})
-                            endif()
-                        endforeach()
-
-                        # TensorRTライブラリの確認（オプション）
-                        set(POTENTIAL_TRT_LIBS "${CUDA_LIB_DIR}/libonnxruntime_providers_tensorrt.so")
-                        foreach(TRT_LIB ${POTENTIAL_TRT_LIBS})
-                            if(EXISTS "${TRT_LIB}")
-                                message(STATUS "✓ TensorRT provider library found: ${TRT_LIB}")
-                                set(ONNXRUNTIME_TRT_LIB ${TRT_LIB})
-                            endif()
-                        endforeach()
-
-                        break()
-                    endif()
-                endforeach()
-
-                if(NOT ONNXRUNTIME_USE_CUDA)
-                    message(WARNING "⚠ CUDA Toolkit found but onnxruntime_providers_cuda library not found")
-                    message(WARNING "  Searched paths:")
-                    foreach(CUDA_LIB ${POTENTIAL_CUDA_LIBS})
-                        message(WARNING "    - ${CUDA_LIB}")
-                    endforeach()
-                    message(WARNING "  Using CPU execution provider")
-                endif()
-            else()
-                message(STATUS "CUDA Toolkit not found, using CPU execution provider")
-                set(ONNXRUNTIME_USE_CUDA FALSE)
-            endif()
-        endif()
-
-        # 最終確認とログ出力
-        if(ONNXRUNTIME_USE_CUDA)
-            message(STATUS "")
-            message(STATUS "🚀 ===== CUDA SUPPORT ENABLED =====")
-            message(STATUS "   CUDA Provider: ${ONNXRUNTIME_CUDA_LIB}")
-            if(ONNXRUNTIME_SHARED_LIB)
-                message(STATUS "   Shared Provider: ${ONNXRUNTIME_SHARED_LIB}")
-            endif()
-            if(ONNXRUNTIME_TRT_LIB)
-                message(STATUS "   TensorRT Provider: ${ONNXRUNTIME_TRT_LIB}")
-            endif()
-            message(STATUS "   Macro ONNXRUNTIME_USE_CUDA will be defined")
-            message(STATUS "===================================")
-            message(STATUS "")
-        else()
-            message(STATUS "")
-            message(STATUS "ℹ CUDA support disabled - using CPU execution provider")
-            message(STATUS "")
-        endif()
-
-
-        
-    endif() # Linux設定終了
-    
-    # 最終確認
-    if(ONNXRUNTIME_FOUND)
-        message(STATUS "✓ ONNX Runtime enabled")
-        message(STATUS "  Include dirs: ${ONNXRUNTIME_INCLUDE_DIRS}")
-        message(STATUS "  Library: ${ONNXRUNTIME_LIB}")
-        if(UNIX AND NOT APPLE AND ONNXRUNTIME_USE_CUDA)
-            message(STATUS "  CUDA support: Enabled")
-        endif()
-    else()
-        message(WARNING "ONNX Runtime not found. AI functionality will be disabled.")
-        set(ENABLE_ONNXRUNTIME OFF)
-    endif()
-endif()
-
 # DCMTK設定（既存の設定を保持）
 set(DCMTK_INCLUDE_DIRS_PRIVATE "")
 
@@ -664,16 +457,6 @@ if(GPU_BACKEND_CUDA)
     # Note: cuda_kernels.cu is included directly in cuda_dose_backend.cu
 endif()
 
-if(ENABLE_ONNXRUNTIME)
-    list(APPEND HEADERS include/ai/onnx_segmenter.h)
-    list(APPEND SOURCES src/ai/onnx_segmenter.cpp)
-    list(APPEND HEADERS include/ai/linux_auto_segmenter.h)
-    list(APPEND HEADERS include/ai/segmentation_pipeline.h)
-    list(APPEND SOURCES src/ai/linux_auto_segmenter.cpp)
-    list(APPEND SOURCES src/ai/segmentation_pipeline.cpp)
-endif()
-
-
 # リソースファイル
 set(RESOURCES
     resources/resources.qrc
@@ -738,40 +521,6 @@ endif()
 
 if(APPLE)
     strip_agl_from_target(ShioRIS3)
-endif()
-
-if(ENABLE_ONNXRUNTIME)
-    target_include_directories(ShioRIS3 PRIVATE ${ONNXRUNTIME_INCLUDE_DIRS})
-    target_link_libraries(ShioRIS3 PRIVATE ${ONNXRUNTIME_LIB})
-    target_compile_definitions(ShioRIS3 PRIVATE USE_ONNXRUNTIME)
-
-    message(STATUS "Configuring ONNX Runtime linking...")
-
-    if(UNIX AND NOT APPLE AND ONNXRUNTIME_USE_CUDA)
-        # CUDA サポート有効化
-        target_compile_definitions(ShioRIS3 PRIVATE ONNXRUNTIME_USE_CUDA)
-        message(STATUS "  ✓ ONNXRUNTIME_USE_CUDA macro defined")
-
-        # CUDA providerライブラリをリンク
-        if(ONNXRUNTIME_CUDA_LIB)
-            target_link_libraries(ShioRIS3 PRIVATE ${ONNXRUNTIME_CUDA_LIB})
-            message(STATUS "  ✓ Linked CUDA provider: ${ONNXRUNTIME_CUDA_LIB}")
-        endif()
-
-        # Shared providerライブラリをリンク（必要な場合）
-        if(ONNXRUNTIME_SHARED_LIB)
-            target_link_libraries(ShioRIS3 PRIVATE ${ONNXRUNTIME_SHARED_LIB})
-            message(STATUS "  ✓ Linked Shared provider: ${ONNXRUNTIME_SHARED_LIB}")
-        endif()
-
-        # TensorRT providerライブラリをリンク（オプション）
-        if(ONNXRUNTIME_TRT_LIB)
-            target_link_libraries(ShioRIS3 PRIVATE ${ONNXRUNTIME_TRT_LIB})
-            message(STATUS "  ✓ Linked TensorRT provider: ${ONNXRUNTIME_TRT_LIB}")
-        endif()
-    else()
-        message(STATUS "  ℹ Using CPU execution provider")
-    endif()
 endif()
 
 # GPU Dose Calculation用のリンク設定
@@ -884,18 +633,8 @@ if(UNIX AND NOT APPLE)
         target_compile_options(ShioRIS3 PRIVATE ${DCMTK_CFLAGS_OTHER})
     endif()
 
-    # RPATH設定（ONNX Runtime）
+    # RPATH設定
     set(RPATH_DIRS "")
-
-    # ONNX Runtime用のRPATH設定
-    if(ENABLE_ONNXRUNTIME AND ONNXRUNTIME_FOUND)
-        get_filename_component(ONNX_LIB_DIR ${ONNXRUNTIME_LIB} DIRECTORY)
-        list(APPEND RPATH_DIRS ${ONNX_LIB_DIR})
-        if(ONNXRUNTIME_CUDA_LIB)
-            get_filename_component(ONNX_CUDA_LIB_DIR ${ONNXRUNTIME_CUDA_LIB} DIRECTORY)
-            list(APPEND RPATH_DIRS ${ONNX_CUDA_LIB_DIR})
-        endif()
-    endif()
 
     if(RPATH_DIRS)
         list(REMOVE_DUPLICATES RPATH_DIRS)
@@ -936,14 +675,6 @@ if(APPLE)
     if(DCMTK_PREFIX)
         target_link_directories(ShioRIS3 PRIVATE ${DCMTK_PREFIX}/lib)
         list(APPEND MAC_EXTRA_RPATHS "${DCMTK_PREFIX}/lib")
-    endif()
-
-    if(ENABLE_ONNXRUNTIME AND ONNXRUNTIME_FOUND)
-        get_filename_component(ONNX_LIB_DIR ${ONNXRUNTIME_LIB} DIRECTORY)
-        if(ONNX_LIB_DIR)
-            target_link_directories(ShioRIS3 PRIVATE ${ONNX_LIB_DIR})
-            list(APPEND MAC_EXTRA_RPATHS "${ONNX_LIB_DIR}")
-        endif()
     endif()
 
     if(MAC_EXTRA_RPATHS)
@@ -988,16 +719,6 @@ message(STATUS "OpenCV_VERSION: ${OpenCV_VERSION}")
 message(STATUS "OpenCV_LIBS: ${OpenCV_LIBS}")
 message(STATUS "DCMTK_INCLUDE_DIRS: ${DCMTK_INCLUDE_DIRS_PRIVATE}")
 message(STATUS "DCMTK_LIBS: ${DCMTK_LIBS}")
-if(ENABLE_ONNXRUNTIME)
-    message(STATUS "ONNX Runtime: Enabled")
-    message(STATUS "ONNX Include: ${ONNXRUNTIME_INCLUDE_DIRS}")
-    message(STATUS "ONNX Library: ${ONNXRUNTIME_LIB}")
-    if(UNIX AND NOT APPLE AND ONNXRUNTIME_USE_CUDA)
-        message(STATUS "CUDA Support: Enabled")
-    endif()
-else()
-    message(STATUS "ONNX Runtime: Disabled")
-endif()
 
 # ビルド後の実行スクリプト生成（macOS）
 if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
