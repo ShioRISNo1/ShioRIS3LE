@@ -358,7 +358,6 @@ set(HEADERS
     include/visualization/fusion_dialog.h
     include/visualization/license_dialog.h
     include/platform/macos_audio_permissions.h
-    include/ai/lmstudio_client.h
     include/database/database_manager.h
     include/database/smart_scanner.h
     include/database/database_sync_manager.h
@@ -413,7 +412,6 @@ set(SOURCES
     src/visualization/data_window.cpp
     src/visualization/fusion_dialog.cpp
     src/visualization/license_dialog.cpp
-    src/ai/lmstudio_client.cpp
     src/qrcodegen.cpp
     src/database/database_manager.cpp
     src/database/smart_scanner.cpp
