@@ -33,8 +33,7 @@ signals:
   void openStudyRequested(const QStringList &imageDirs,
                           const QStringList &modalities,
                           const QStringList &rtssPaths,
-                          const QStringList &rtdosePaths,
-                          const QStringList &rtplanPaths);
+                          const QStringList &rtdosePaths);
   void changeDataRootRequested(const QString &newRoot);
   void openDicomFileRequested(const QString &filePath);
   void openDicomFolderRequested(const QString &folderPath);

@@ -26,7 +26,6 @@ public:
     void setPixelSpacing(float spacingX, float spacingY);
     void setStructureLines(const StructureLineList& lines);
     void setStructurePoints(const StructurePointList& points);
-    void setReferencePoints(const StructurePointList& points);
     void setDoseLines(const StructureLineList& lines);
     void setStructureLineWidth(int width);
     void setSlicePositionLines(const StructureLineList& lines);
@@ -58,7 +57,6 @@ private:
     float m_spacingY{1.0f};
     StructureLineList m_structureLines;
     StructurePointList m_structurePoints;
-    StructurePointList m_referencePoints;
     StructureLineList m_doseLines;
     StructureLineList m_slicePositionLines;
     int m_structureLineWidth{1};

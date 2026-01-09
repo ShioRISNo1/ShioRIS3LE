@@ -243,8 +243,7 @@ void MainWindow::showDataWindow() {
     connect(m_dataWindow, &DataWindow::openStudyRequested, this,
             [this](const QStringList &imageDirs, const QStringList &modalities,
                    const QStringList &rtssPaths,
-                   const QStringList &rtdosePaths,
-                   const QStringList &rtplanPaths) {
+                   const QStringList &rtdosePaths) {
               bool studyLoaded = false;
               if (!imageDirs.isEmpty()) {
                 const QString path = imageDirs.first();
@@ -258,7 +257,7 @@ void MainWindow::showDataWindow() {
 
                   if (studyLoaded) {
                     const int total =
-                        rtdosePaths.size() + rtplanPaths.size() +
+                        rtdosePaths.size() +
                         (rtssPaths.isEmpty() ? 0 : 1);
                     bool pendingPrimaryDose = true;
                     auto loadDose = [&](const QString &dosePath) {
@@ -284,11 +283,6 @@ void MainWindow::showDataWindow() {
                         progress.setValue(++step);
                         QApplication::processEvents();
                       }
-                      for (const QString &p : rtplanPaths) {
-                        m_dicomViewer->loadBrachyPlanFile(p);
-                        progress.setValue(++step);
-                        QApplication::processEvents();
-                      }
                       if (!rtssPaths.isEmpty()) {
                         m_dicomViewer->loadRTStructFile(rtssPaths.first());
                         progress.setValue(++step);
@@ -298,8 +292,6 @@ void MainWindow::showDataWindow() {
                     } else {
                       for (const QString &d : rtdosePaths)
                         loadDose(d);
-                      for (const QString &p : rtplanPaths)
-                        m_dicomViewer->loadBrachyPlanFile(p);
                       if (!rtssPaths.isEmpty())
                         m_dicomViewer->loadRTStructFile(rtssPaths.first());
                     }

@@ -1062,7 +1062,6 @@ void DataWindow::onOpenSelected() {
   };
   QStringList rtssPaths;
   QStringList rtdosePaths;
-  QStringList rtplanPaths;
 
   auto imagingFileForItem = [&](QTreeWidgetItem *item) -> QString {
     if (!item)
@@ -1085,7 +1084,6 @@ void DataWindow::onOpenSelected() {
 
   QSet<QString> seenStructPaths;
   QSet<QString> seenDosePaths;
-  QSet<QString> seenPlanPaths;
 
   auto appendRtPath = [&](const QString &modality, const QString &path) {
     if (path.isEmpty())
@@ -1100,11 +1098,6 @@ void DataWindow::onOpenSelected() {
         return;
       seenDosePaths.insert(path);
       rtdosePaths << path;
-    } else if (modality == QLatin1String("RTPLAN")) {
-      if (seenPlanPaths.contains(path))
-        return;
-      seenPlanPaths.insert(path);
-      rtplanPaths << path;
     }
   };
 
@@ -1237,8 +1230,7 @@ void DataWindow::onOpenSelected() {
     imageModalities << sel.modality;
   }
 
-  emit openStudyRequested(imageDirs, imageModalities, rtssPaths, rtdosePaths,
-                          rtplanPaths);
+  emit openStudyRequested(imageDirs, imageModalities, rtssPaths, rtdosePaths);
 }
 
 void DataWindow::onRescan() {

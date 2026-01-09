@@ -244,11 +244,6 @@ set(HEADERS
     include/dicom/dose_resampled_volume.h
     include/dicom/dvh_calculator.h
     include/dicom/dpsd_calculator.h
-    include/dicom/brachy_plan.h
-    include/dicom/dose_evaluation_point.h
-    include/brachy/ir_source_data.h
-    include/brachy/brachy_dose_calculator.h
-    include/brachy/dwell_time_optimizer.h
     include/qcustomplot.h
     include/visualization/dicom_viewer.h
     include/visualization/collapsible_group_box.h
@@ -289,10 +284,6 @@ set(SOURCES
     src/dicom/dose_resampled_volume.cpp
     src/dicom/dvh_calculator.cpp
     src/dicom/dpsd_calculator.cpp
-    src/dicom/brachy_plan.cpp
-    src/brachy/ir_source_data.cpp
-    src/brachy/brachy_dose_calculator.cpp
-    src/brachy/dwell_time_optimizer.cpp
     src/visualization/dicom_viewer.cpp
     src/visualization/collapsible_group_box.cpp
     src/visualization/opengl_image_widget.cpp
