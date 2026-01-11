@@ -130,6 +130,8 @@ QString LicenseDialog::generateLicenseInfo()
     html += "a:hover { text-decoration: underline; }";
     html += "p { line-height: 1.1; margin: 3px 0; letter-spacing: -0.1px; font-size: 11px; }";
     html += ".note { color: #757575; font-style: italic; font-size: 10px; }";
+    html += ".warning { background-color: #fff3cd; border: 2px solid #ff9800; border-radius: 8px; padding: 12px; margin: 10px 0; color: #856404; }";
+    html += ".warning h3 { color: #d32f2f; margin-top: 0; font-size: 13px; }";
     html += "</style></head><body>";
 
     html += "<h2>About ShioRIS3LE</h2>";
@@ -139,6 +141,19 @@ QString LicenseDialog::generateLicenseInfo()
     html += "Qt6, DCMTK, OpenCV, and AI-powered features, it aims to support clinical workflow and research.</p>";
     html += "<p style='margin-top: 8px;'><strong>Developer:</strong> Hiroya Shiomi</p>";
     html += "<p><strong>Copyright:</strong> © 2024-2026 Hiroya Shiomi. All rights reserved.</p>";
+
+    html += "<div class='warning'>";
+    html += "<h3>⚠ IMPORTANT DISCLAIMER</h3>";
+    html += "<p><strong>THIS SOFTWARE IS FOR RESEARCH AND DEVELOPMENT PURPOSES ONLY.</strong></p>";
+    html += "<p><strong>DO NOT USE FOR CLINICAL PURPOSES.</strong> This software is not approved for clinical use, ";
+    html += "diagnosis, or treatment of patients. It is intended solely for research, educational, and development purposes.</p>";
+    html += "<p style='margin-top: 6px;'><strong>NO WARRANTY:</strong> This software is provided \"AS IS\" without warranty of any kind, ";
+    html += "either express or implied, including but not limited to warranties of merchantability, ";
+    html += "fitness for a particular purpose, or non-infringement.</p>";
+    html += "<p style='margin-top: 6px;'><strong>NO LIABILITY:</strong> The developer assumes no responsibility or liability ";
+    html += "for any errors, inaccuracies, or consequences arising from the use of this software. ";
+    html += "Users assume all risks and responsibilities associated with its use.</p>";
+    html += "</div>";
 
     html += "<h2>Open Source Libraries</h2>";
 
