@@ -133,8 +133,12 @@ QString LicenseDialog::generateLicenseInfo()
     html += "</style></head><body>";
 
     html += "<h2>About ShioRIS3LE</h2>";
-    html += "<p>ShioRIS3LE is a prototype DICOM viewer and radiation treatment planning system ";
-    html += "built with Qt6, DCMTK, and OpenCV.</p>";
+    html += "<p>ShioRIS3LE is a prototype DICOM viewer and radiation treatment planning system.</p>";
+    html += "<p>This software provides comprehensive tools for medical image visualization, ";
+    html += "radiation treatment planning, and dose analysis. Built with modern technologies including ";
+    html += "Qt6, DCMTK, OpenCV, and AI-powered features, it aims to support clinical workflow and research.</p>";
+    html += "<p style='margin-top: 8px;'><strong>Developer:</strong> Hiroya Shiomi</p>";
+    html += "<p><strong>Copyright:</strong> © 2024-2026 Hiroya Shiomi. All rights reserved.</p>";
 
     html += "<h2>Open Source Libraries</h2>";
 
@@ -196,7 +200,7 @@ QString LicenseDialog::generateLicenseInfo()
 
     html += "<hr style='margin-top: 30px; border: none; border-top: 1px solid #4a4a4a;'>";
     html += "<p style='text-align: center; color: #888888;'>";
-    html += "© 2024 ShioRIS3LE Development Team<br>";
+    html += "© 2024-2026 Hiroya Shiomi. All rights reserved.<br>";
     html += "This software is a research and development prototype.";
     html += "</p>";
 
