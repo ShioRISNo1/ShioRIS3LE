@@ -130,7 +130,7 @@ QString LicenseDialog::generateLicenseInfo()
     html += "a:hover { text-decoration: underline; }";
     html += "p { line-height: 1.1; margin: 3px 0; letter-spacing: -0.1px; font-size: 11px; }";
     html += ".note { color: #757575; font-style: italic; font-size: 10px; }";
-    html += ".warning { background-color: #fff3cd; border: 2px solid #ff9800; border-radius: 8px; padding: 12px; margin: 10px 0; color: #856404; }";
+    html += ".warning { border: 2px solid #ff9800; border-radius: 8px; padding: 12px; margin: 10px 0; }";
     html += ".warning h3 { color: #d32f2f; margin-top: 0; font-size: 13px; }";
     html += "</style></head><body>";
 
